@@ -1,6 +1,13 @@
 /******************************************************************************
 *
-
+* helloworld.c: simple test application
+*
+* MODIFICATION HISTORY:
+*
+* Ver   Who      Date     Changes
+* ----- -------- -------- -----------------------------------------------
+* 0.1 	Kostya 	 29/12/21 First release
+*
 *
 ******************************************************************************/
 
@@ -9,14 +16,29 @@
 #include "xil_printf.h"
 #include "sleep.h"
 
-#define NMAX 60
-
 int main()
 {
 	unsigned int n,i;
 
+	#define NMAX 10
+
 	init_platform();
+
 	xil_printf("\r######################################## \n\r");
+
+	xil_printf("CPU: ");
+
+	#if defined (ARMR5)
+		xil_printf("RPU R5");
+	#elif defined (__aarch64__) || defined (ARMA53_32)
+		xil_printf("APU A53");
+	#elif defined (__MICROBLAZE__)
+		xil_printf("MICROBLAZE");
+	#else
+		xil_printf("Unknown");
+	#endif
+		xil_printf(" \n\r");
+
 	xil_printf("Start Hello World application \n\r");
 	for(n=0; n<NMAX; n++)
 	{
