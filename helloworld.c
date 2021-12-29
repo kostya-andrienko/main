@@ -11,7 +11,6 @@
 
 #define NMAX 60
 
-
 int main()
 {
 	unsigned int n,i;
