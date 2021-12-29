@@ -9,11 +9,11 @@
 #include "xil_printf.h"
 #include "sleep.h"
 
+#define NMAX 60
+
 int main()
 {
 	unsigned int n,i;
-
-	#define NMAX 60
 
 	init_platform();
 	xil_printf("\r######################################## \n\r");
