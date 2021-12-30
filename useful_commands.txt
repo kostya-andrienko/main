@@ -1,0 +1,441 @@
+
+################################################### Linux Ubuntu/RHEL Commands ###################################################
+### updates
+sudo apt-get update && sudo apt update && sudo apt-get upgrade && sudo apt upgrade
+
+### for use media-ctl install v4l2-ctl first
+sudo apt-get install v4l2-ctl
+
+### change  host system /bin/sh to bash
+sudo dpkg-reconfigure dash
+
+### find string in dmesg
+dmesg | grep <string>
+
+### Kernel version
+uname -r
+
+### change owner of directory/file
+sudo chown -R $USER /<path>
+sudo chown -R hill pkg/
+
+### Find a file called testfile.txt in current and sub-directories.
+find . -name testfile.txt
+
+### find text in files
+grep -rn "#text-to-find" ./
+
+### read/write memory address (work on Ubuntu?)
+devmem 
+
+### directory size
+sudo du -ch Kostya/ --max-depth=1 | sort -h
+sudo baobab
+
+### fix sftp Host key verification failed
+sudo mv ~/.ssh/known_hosts ~/.ssh/known_hosts_backup
+
+### Display the tree hierarchy of a directory
+tree -L 3 ./directory
+
+### copy folder
+rsync -av --progress /path/to/source/ /path/to/dest
+
+### Difference Between Two Directories
+diff -qr directory-1/ directory-2/ 
+
+### gpsd 
+stty -F /dev/ttyUL3 19200
+sudo gpsd -D 5 -N -n /dev/ttyUSB1
+telnet localhost 2947 #enter the command ?WATCH={"enable":true,"json":true}
+# Default settings for the gpsd
+/etc/default/gpsd
+# Default settings for the gpsd socket
+/lib/systemd/system/gpsd.socket
+xgps 
+cgps -s
+sudo gpsmon /dev/ttyUSB1
+
+### chrony
+sudo service chrony status
+chronyc activity
+chronyc tracking
+chronyc sources -v
+chronyc sourcestats -v
+# chrony configuration settings (see https://chrony.tuxfamily.org/manual.html#Configuration-file)
+sudo gedit /etc/chrony/chrony.conf
+
+### opet ports
+netstat -lntp
+
+### set primary monitor
+xrandr --output DP-2 --primary
+
+### apps
+renger 	# file manager
+htop	# like top
+ncdu	# mamory usage 
+hollywood
+cmatrix
+
+################################################### Linux Bash Scripts ###################################################
+
+read -p "Enter required stage: " stage
+	
+# input sanity check
+if [ "$stage" == "q" ] || [ "$stage" == "m" ] || [ "$stage" == "d" ]
+then
+	continue
+fi
+if [[ "$stage"=~'^[0-9]$' && "$stage" -ge 1 && "$stage" -le 5 ]] # if input is a integer number from 1 to 5
+then
+	continue	
+fi
+
+################################################### Petalinux ###################################################
+### Create new project
+cd <plnx-project-path>
+petalinux-create --type project --name petalinux --template zynqMP
+
+### Create project based on specified BSP file
+cd <plnx-project-path>
+petalinux-create -t project -s <PATH-TO-BSP-file>
+
+### PetaLinux BSP packages are available on the
+https://www.xilinx.com/support/download/index.html/content/xilinx/en/downloadNav/embedded-design-tools/2018-3.html
+
+### Import the hardware description 
+petalinux-config --get-hw-description=/home/ubuntu/Kostya/Enclustra/04_PE1_XU8_FrameBuffer/04_PE1_XU8_FrameBuffer_01/Vivado_PE1/MercuryXU8_PE1.sdk
+petalinux-config --get-hw-description=/home/ubuntu/Kostya/iVeia/01_TXD5-3320-00_Atlas-II-Z8-XCZU4EV_2018.3/vivado/TXD5-3320-00_Atlas-II-Z8-XCZU4EV.sdk 
+petalinux-config --get-hw-description=/home/ubuntu/Kostya/IMS1/00_IMS1-1330-00_XU8_Rev-00-00/vivado/IMS1-1330-00_XU8.sdk
+petalinux-config --get-hw-description=../vivado/IMS1-1330-00_XU8.sdk
+petalinux-config --get-hw-description=../sdk
+petalinux-config --get-hw-description=../vitis
+
+ → Subsystem AUTO Hardware Settings → Advanced bootable images storage Settings 
+boot image setting 		---> image storage media --> primary sd
+u-boot env partition settings  	---> image storage media --> primary sd
+kernel image settings  		---> image storage media --> primary sd
+jffs2 rootfs image settings  	---> image storage media --> primary flash
+dtb image settings  		---> image storage media --> from boot image
+
+### create sysroot
+petalinux-build --sdk
+petalinux-package --sysroot
+
+### create user app
+petalinux-create -t apps -n <NAME> --enable
+
+### create BOOT.bin
+petalinux-package --boot --fsbl=../pre-built/sdk/fsbl.elf --fpga --u-boot --add=../pre-built/sdk/FalCon.elf --cpu=r5-0 --force -o //sd_card/BOOT.bin
+petalinux-package --boot --fsbl images/linux/zynqmp_fsbl.elf --u-boot images/linux/u-boot.elf --pmufw images/linux/pmufw.elf --fpga images/linux/system.bit --force
+
+### Extract the file rootfs.tar.gz to the SD second (EXT4) partition
+tar -xf rootfs.tar.gz -C /mnt	
+
+### dummy driver
+petalinux-create -t modules --name v4l2dummy --enable
+
+### create device tree .txt file
+fdtdump ./images/linux/system.dtb > ./images/linux/SYSTEM_DTB.txt | gedit ./images/linux/SYSTEM_DTB.xt
+
+### Copy to SD card
+sudo mount /dev/sdc1 /mnt
+sudo cp petalinux/IMS1-CPU-PLNX-V01/images/linux/image.ub /mnt
+sudo cp Vivado_PE1/MercuryXU8_PE1.sdk/rpu_r5_0/bootimage/BOOT.bin /mnt
+sudo umount /dev/sdc1
+!!! Remember safety remove eject
+
+### verify the hostname, product, version
+cat /etc/hostname
+cat /etc/petalinux/product
+cat /etc/petalinux/version
+
+### GPIO
+# gpio device type
+cat /sys/class/gpio/gpiochip480/label 
+# gpio device io amount
+cat /sys/class/gpio/gpiochip480/ngpio
+
+echo 480 > /sys/class/gpio/export
+echo out > /sys/class/gpio/gpio480/direction
+echo 1 > /sys/class/gpio/gpio480/value 
+
+### network configuration
+/etc/network/interfaces
+/etc/udev/rules.d/ ...
+/dev/udev_network_queue
+cat /sys/class/net/eth0/device/uevent | grep OF_FULLNAME
+
+################################################### Vivado / SDK ###################################################
+### SDK - Create Boot Image (from .bif file)
+bootgen -image /home/ubuntu/Kostya/Enclustra/04_PE1_XU8_FrameBuffer/01_PE1_XU8_master_FrBufwr02/Vivado_PE1/MercuryXU8_PE1.sdk/rpu_r5_0/bootimage/rpu_r5_0.bif -arch zynqmp -o /home/ubuntu/Kostya/Enclustra/04_PE1_XU8_FrameBuffer/01_PE1_XU8_master_FrBufwr02/Vivado_PE1/MercuryXU8_PE1.sdk/rpu_r5_0/bootimage/BOOT.bin -w on
+
+# in case of "[WARNING]: [fsbl_config] a53_x64 | a53_x32 | r5_single | r5_dual will be deprecated, please use 'destination_cpu' attribute of bootloader partition" change .bif:
+//[fsbl_config]a53_x64
+[bootloader,destination_cpu=a53-0]fsbl.elf
+
+# 
+vivado -nojournal -nolog -notrace
+
+### SDK Linux Application toolchain Path
+/home/ubuntu/work/petalinux183/tools/linux-i386/aarch64-linux-gnu
+
+################################################### Video Pipeline ###################################################
+https://developer.ridgerun.com/wiki/index.php?title=Zynq_Ultrascale%2B_Capture_settings_and_Gstreamer_pipelines
+
+modetest is the test application available from libdrm
+
+### 
+dmesg | grep "v_frmbuf\|vcap\|v_proc_ss\|v_tc\|v_tpg\|vcu\|Controp"  
+
+### print all video or media or v4l devices 
+ls /dev | grep "video\|media\|v4l"
+
+ls -al /dev/v4l/by-*
+
+### list video capture devices
+v4l2-ctl --list-devices
+
+### print the topology
+media-ctl -d /dev/media0 -p && media-ctl -d /dev/media1 -p
+
+### Configure the TPG subdevice format
+media-ctl -d /dev/media0 --set-v4l '5:0 [fmt:YUYV8_2X8/1920x1080]'
+media-ctl -d /dev/media0 --set-v4l '5:0 [fmt:YUYV/1280x720]' 
+media-ctl -d /dev/media0 --set-v4l '"b0020000.v_tpg":0 [fmt:UYVY/1920x1080]'
+media-ctl -d /dev/media0 --set-v4l '5:0 [fmt:RGB888_1X24/1920x1080]' 
+#List known media bus formats and their numeric values
+media-ctl -d /dev/media0 --known-mbus-fmts
+
+
+### List the TPG subdevice controls and print the current values
+yavta --no-query -l /dev/v4l-subdev0
+
+### Configure the TPG subdevice 
+# 1080p timing
+yavta --no-query -w '0x009e0901 45' /dev/v4l-subdev0
+yavta --no-query -w '0x009e0902 280' /dev/v4l-subdev0
+# 720p timing 
+yavta --no-query -w '0x009e0901 30' /dev/v4l-subdev0 
+yavta --no-query -w '0x009e0902 370' /dev/v4l-subdev0
+# Foreground Pattern = Moving Box
+yavta --no-query -w '0x0098c912 1' /dev/v4l-subdev0
+# Motion Speed
+yavta --no-query -w '0x0098c907 1' /dev/v4l-subdev0
+# Test Pattern
+yavta --no-query -w '0x0098c903 1' /dev/v4l-subdev0
+
+# >>> Configure the TPG subdevice: 720p, Moving Box, Motion Speed=1
+media-ctl -d /dev/media0 --set-v4l '5:0 [fmt:YUYV/1280x720]' &&
+yavta --no-query -w '0x009e0901 30' /dev/v4l-subdev0 &&
+yavta --no-query -w '0x009e0902 370' /dev/v4l-subdev0 && 
+yavta --no-query -w '0x0098c912 1' /dev/v4l-subdev0 && 
+yavta --no-query -w '0x0098c907 1' /dev/v4l-subdev0 
+
+### List pixel formats of video device
+v4l2-ctl -d /dev/video0 --list-formats
+for d in /dev/video* ; do echo $d ; v4l2-ctl --device=$d -D --list-formats  ; echo '===============' ; done
+
+### Set the pixel format and video dimensions on the video node
+v4l2-ctl -d /dev/video0 --set-fmt-video=width=1280,height=1024,pixelformat='YUYV'
+v4l2-ctl -d /dev/video1 --set-fmt-video=width=1280,height=720,pixelformat='YUYV'
+v4l2-ctl -d /dev/video2 --set-fmt-video=width=640,height=512,pixelformat='YUYV'
+
+v4l2-ctl -d /dev/video0 --set-fmt-video=width=1280,height=720,pixelformat='NV16'
+v4l2-ctl -d /dev/video1 --set-fmt-video=width=1280,height=720,pixelformat='NV16'
+v4l2-ctl -d /dev/video2 --set-fmt-video=width=640,height=512,pixelformat='NV16'
+
+v4l2-ctl -d /dev/video1 --set-fmt-video=width=640,height=480,pixelformat='NV16'
+
+v4l2-ctl -d /dev/video0 -V 
+v4l2-ctl -d /dev/video1 -V
+v4l2-ctl -d /dev/video2 -V
+v4l2-ctl --all -d /dev/video0
+v4l2-ctl --device /dev/video0 --all
+
+### run a v4l2-compliance test
+v4l2-compliance -d /dev/video0
+
+### capture a single raw frame using mmap method
+v4l2-ctl --device /dev/video0 --stream-mmap --stream-to=frame.raw --stream-count=1
+
+### Getting supported yavta controls/formats/resolutions
+yavta -l --enum-formats --enum-inputs /dev/video0
+
+### Capture frames
+yavta -n 3 -c10 -f YUYV -s 1280x1024 --skip 7 -F /dev/video0
+yavta -n 3 -c10 -f YUYV -s 1640x512 --skip 7 -F /dev/video3
+
+### ### ### ### ### ### ### ### ### GStreamer ### ### ### ### ### ### ### ### ###
+export GST_DEBUG=4
+
+### ### ### ### ### ### ### ### ### RAW video streaming ### ### ### ###
+# GStreamer server (board)
+gst-launch-1.0 -v v4l2src device=/dev/video0 ! video/x-raw, width=1280, height=1024, framerate=25/1, format=UYVY  ! videoconvert! rtpvrawpay pt=96 name=pay0 mtu=65000 ! queue ! udpsink host=192.168.0.100 port=5200 
+
+gst-launch-1.0 -v videotestsrc ! video/x-raw, width=1280, height=1024, framerate=25/1, format=UYVY ! videoconvert! rtpvrawpay pt=96 name=pay0 mtu=65000 ! queue ! udpsink host=192.168.0.100 port=5200 
+
+# GStreamer client (PC)
+gst-launch-1.0 udpsrc port="5200" caps = "application/x-rtp, media=(string)video, clock-rate=(int)90000, encoding-name=(string)RAW, sampling=(string)YCbCr-4:2:2, depth=(string)8, width=(string)1280, height=(string)1024, colorimetry=(string)BT709-2, payload=(int)96, ssrc=(uint)964707840, timestamp-offset=(uint)4049093488, seqnum-offset=(uint)11286, a-framerate=(string)25" ! queue ! rtpvrawdepay ! videoconvert ! queue ! fpsdisplaysink
+
+### ### ### ### ### ### ### ### ### Compressed (VCU) video streaming ### ### ### ###
+### server (board)- VCU test source 
+gst-launch-1.0 -v videotestsrc ! "video/x-raw, width=1280, height=720, framerate=25/1, format=NV16" ! videoconvert ! omxh265enc target-bitrate=5000 ! rtph265pay ! udpsink host=192.168.0.100 port=5003
+
+### server (board) - video source video  ==> VLC on host PC (udp://@:5003)
+gst-launch-1.0 -v v4l2src device=/dev/video0 ! "video/x-raw, width=1280, height=1024, framerate=25/1" ! videoconvert ! omxh264enc target-bitrate=5000 ! h264parse config-interval=-1 ! queue ! mpegtsmux name=mux ! udpsink host=192.168.0.100 port=5100
+
+### server (board) - video source video  ==> GStreamer on host PC
+gst-launch-1.0 -v v4l2src device=/dev/video1 ! "video/x-raw, width=1280, height=1026, framerate=25/1" ! videoconvert ! omxh264enc target-bitrate=5000 ! rtph264pay ! udpsink host=192.168.0.100 port=51000
+
+gst-launch-1.0 -e v4l2src device=/dev/video0 ! "video/x-raw, width=1280, height=1024, framerate=25/1" ! videoconvert ! omxh264enc qp-mode=auto gop-mode=low-delay-p gop-length=25 periodicity-idr=25 b-frames=0 target-bitrate=5000 control-rate=low-latency ! queue ! rtph264pay ! udpsink host=192.168.0.100 port=5100 buffer-size=60000000 max-bitrate=120000000 max-lateness=-1 qos-dscp=60 async=false 
+
+gst-launch-1.0 -e v4l2src device=/dev/video1 ! "video/x-raw, width=1280, height=1026, framerate=25/1" ! videoconvert ! omxh264enc qp-mode=auto gop-mode=low-delay-p gop-length=25 periodicity-idr=25 b-frames=0 target-bitrate=50000 control-rate=low-latency ! queue ! rtph264pay ! udpsink host=192.168.0.100 port=52000 buffer-size=60000000 max-bitrate=120000000 max-lateness=-1 qos-dscp=60 async=false &
+gst-launch-1.0 -e v4l2src device=/dev/video2 ! "video/x-raw, width=1280, height=1026, framerate=25/1" ! videoconvert ! omxh264enc qp-mode=auto gop-mode=low-delay-p gop-length=25 periodicity-idr=25 b-frames=0 target-bitrate=50000 control-rate=low-latency ! queue ! rtph264pay ! udpsink host=192.168.0.100 port=53000 buffer-size=60000000 max-bitrate=120000000 max-lateness=-1 qos-dscp=60 async=false &
+gst-launch-1.0 -e v4l2src device=/dev/video3 ! "video/x-raw, width=1280, height=1026, framerate=25/1" ! videoconvert ! omxh264enc qp-mode=auto gop-mode=low-delay-p gop-length=25 periodicity-idr=25 b-frames=0 target-bitrate=50000 control-rate=low-latency ! queue ! rtph264pay ! udpsink host=192.168.0.100 port=54000 buffer-size=60000000 max-bitrate=120000000 max-lateness=-1 qos-dscp=60 async=false &
+
+### client - host PC
+gst-launch-1.0 udpsrc port=51000 buffer_size=50000 ! application/x-rtp, encoding-name=H264, payload=96 ! rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! fpsdisplaysink &
+gst-launch-1.0 udpsrc port=52000 buffer_size=50000 ! application/x-rtp, encoding-name=H264, payload=96 ! rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! fpsdisplaysink &
+gst-launch-1.0 udpsrc port=53000 buffer_size=50000 ! application/x-rtp, encoding-name=H264, payload=96 ! rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! fpsdisplaysink &
+gst-launch-1.0 udpsrc port=54000 buffer_size=50000 ! application/x-rtp, encoding-name=H264, payload=96 ! rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! fpsdisplaysink &
+
+################################################### Git ###################################################
+==> TIP: origin - this is just a remote repo name and can be changed
+==> TIP: you can add the same remote to exist folder again - just change the remote name (i.e. change origin)
+
+### Add local folder to remote EMPTY repository (i.e. create local master -> push to repo)
+git init
+git add .
+git commit -m "First commit"
+# adding a new remote (remote name "origin" can be changed)
+git remote add origin <remote repository URL>
+# Verify new remote
+git remote -v
+# Pushe the local master up to the remote repository you specified as the origin
+git push origin master
+
+### Add local folder to remote branch (i.e. push local branch to remote branch of non-empty repo)
+git init
+git add .
+git commit -m "First commit"
+# adding a new remote (remote name "origin" can be changed)
+git remote add origin <remote repository URL>
+# Verify new 
+git remote -v
+# create local branch based on local master
+git checkout -b <local branch name> master
+# push the local branch to remote branch on remote repository you specified as the origin
+git push origin <local branch name>
+
+###
+git diff <branch1> <branch2> --name-status
+
+### log
+git log --reflog
+git log --pretty=oneline --decorate
+# visual presentation of all git commits
+git reflog |  awk '{ print $1 }' | xargs gitk
+### branch activityies
+git reflog
+
+### remove Untracked directories
+git clean -fd
+### remove Untracked files
+git clean -fX
+
+### untrack folder/files
+git rm -r vivado/IMS1-1330-00_XU8.sdk/ --cached
+
+### Merge Strategies
+--strategy-option=theirs
+
+### git worktree 
+git worktree list
+git worktree add <path> <commit>
+
+### branch activityies
+git reflog
+
+### 
+
+################################################### QT ###################################################
+### config board for debug
+// mount to root and copy files from /usr/sbin/Files/
+mount /dev/mmcblk1p2 /mnt
+cp -r /usr/sbin/Files/ /mnt/SWIFT/
+
+################################################### ISM1-1330-00 + XU8 ###################################################
+### SOM XU8 PS_LED0# [PS_MIO24 / Revers logic]
+echo 330 > /sys/class/gpio/export                                                                                                                                    
+echo out > /sys/class/gpio/gpio330/direction                                                                                                                         
+echo 1 > /sys/class/gpio/gpio330/value
+
+# pl eth sfp 1g
+ifconfig eth1 down
+ifconfig eth1 hw ether 00:0A:35:00:22:23
+ifconfig eth0 192.168.0.10 netmask 255.255.255.0 broadcast 0.0.0.0 up
+
+ip link set eth1 down
+ip maddr add 00:0A:35:00:00:01 dev eth1
+ip addr add 192.168.0.10/24 dev eth1
+ip link set eth1 up
+ping 192.168.1.102
+
+### aurora video pipeline 
+mpv --no-cache --untimed --no-demuxer-thread --video-sync=audio --vd-lavc-threads=1 udp://192.168.0.100:51000
+ffplay -fflags nobuffer -flags low_delay udp://192.168.0.100:51000 
+
+### encoder default
+gst-launch-1.0 v4l2src device=/dev/video1 \
+! capsfilter caps="video/x-raw, width=1280, height=1026, framerate=25/1, format=NV16" \
+! videoconvert \
+! omxh264enc target-bitrate=5000 periodicity-idr=25 gop-length=25 b-frames=0 control-rate=low-latency qp-mode=auto num-slices=8 cpb-size=100 loop-filter-mode=enable prefetch-buffer=TRUE low-bandwidth=false filler-data=0 initial-delay=250 entropy-mode=CAVLC \
+! capsfilter caps="video/x-h264, profile=high-4:2:2, level=(string)5.2" \
+! h264parse config-interval=1 \
+! mpegtsmux name=muxer alignment=7 \
+! queue \
+! udpsink host=192.168.0.100 port=51000 \
+
+### encoder changed
+gst-launch-1.0 v4l2src device=/dev/video1  ! capsfilter caps="video/x-raw, width=1280, height=1026, framerate=25/1, format=NV16" ! videoconvert ! omxh264enc target-bitrate=50000 periodicity-idr=1 gop-length=1 b-frames=0 control-rate=low-latency qp-mode=auto num-slices=8 loop-filter-mode=enable prefetch-buffer=TRUE low-bandwidth=false filler-data=0 initial-delay=1 entropy-mode=CABAC ! capsfilter caps="video/x-h264, profile=high-4:2:2, level=(string)5.2" ! h264parse config-interval=1 !  mpegtsmux name=muxer alignment=7 ! queue ! udpsink host=192.168.0.100 port=51000 &
+
+# i2c scan
+i2cdetect -r -y 0
+
+#sfp (addresses 0x50 0x51 see SFF-8472 document)
+for addr in 3 4 5 6 7 8 9 10 36 ; do echo $addr; i2cget -y 0 0x50 $addr b ; done
+
+taskset -c 0 netperf -H 192.168.2.103 -c -C -t UDP_STREAM & taskset -c 1 netperf -H 192.168.2.103 -c -C -t UDP_STREAM & taskset -c 2 netperf -H 192.168.2.103 -c -C -t UDP_STREAM & taskset -c 3 netperf -H 192.168.2.103 -c -C -t UDP_STREAM
+
+taskset -c 0 iperf3 -u -c 192.168.2.103 -T s1 -t 10 -i 10 -b 2500M -Z & iperf3 -u -c 192.168.2.103 -T s1 -t 10 -i 10 -b 2500M -Z &
+
+### usb 3.0
+echo /sbin/mdev/ > /proc/sys/kernel/hotplug
+mdev -s
+OR
+- desactivate busybox mdev in rootfs config : Filesystem Packages  -> base -> b
+
+### bash 
+for i in {0..20}; do wr0=$((0xA0050000+$(($i*4)))); rd=$((0xA0080000+$(($i*4)))); printf "0x%08X : 0x%8X\t\t0x%08X : 0x%8X\n" $wr0 $(devmem $wr0) $rd $(devmem $rd); done
+
+for i in {0..40}; do vtc=$((0xA0090000+$(($i*4)))); printf "0x%08X : 0x%8X\n" $vtc $(devmem $vtc); done
+
+### gpsd 
+killall -9 gpsd chronyd
+stty -F /dev/ttyUL3 19200
+gpsd -D 5 -N -n /dev/ttyUL3
+chronyd -f /etc/chrony.conf
+
+###
+telnet localhost 2947 #enter the command ?WATCH={"enable":true,"json":true}
+# Default settings for the gpsd
+/etc/default/gpsd
+
+####
+chronyc activity
+chronyc tracking
+chronyc sources -v
+chronyc sourcestats -v  
+
