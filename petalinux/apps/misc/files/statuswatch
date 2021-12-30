@@ -1,0 +1,1081 @@
+#!/bin/bash
+
+# File name: 		statuswatch (shell script)
+# Author:			Kostya A.
+# Date Modified:	18/11/2021
+# Description: 		TODO: add
+# Known issues:		Ctrl+Z usage
+
+#=================================================================================================================================================
+# Initial settings
+#=================================================================================================================================================
+echo -e -n "\e[0m"
+#set -e
+
+#=================================================================================================================================================
+# Global variables
+#=================================================================================================================================================
+readonly g_version=v0.64
+readonly g_vdate=18-Nov-2021
+readonly g_title=statuswatch
+readonly FALSE=0
+readonly TRUE=1
+readonly SEC="sec"
+readonly mSEC="msec"
+readonly g_refresh_period_default=.500
+readonly g_2pwr32max=$((2**32))
+readonly g_2pwr32med=$(($g_2pwr32max/2))
+
+g_win_siz_chg=$TRUE
+g_periodic_display=$FALSE
+g_print_SWIFT_info=$FALSE
+
+# error status codes
+exit_sts_no_arg0=10
+exit_sts_no_arg1=11
+exit_sts_no_arg2=12
+err_sts_bad_arg0=13
+
+# Base Addresses
+BASEADDR_FALCON_STATUSWATCH=0x3000FF00						# RPU-APU statuswatch base address
+BASEADDR_VID_STS_REG=0xA0040000								# PL video status register module base address
+BASEADDR_TLMTRY_CH=(0xA0041000 0xA0042000 0xA0043000)		# PL telemetry sniffers base addresses
+BASEADDR_BIT=(0x3000FC00 0x3000FD00 0x3000FE00)				# RPU-APU BIT (PBIT, CBIT, IBIT) base address
+
+# Special characters (see https://www.utf8-chartable.de/unicode-utf8-table.pl "Latin-1 Supplement", "Box Drawing" blocks)
+c_vl="\xe2\x94\x82"		# vertical continuous line
+c_hl="\xe2\x94\x80" 	# horizontal continuous line
+micro="\xc2\xb5"		# micro sign
+dvsns="\xc3\xb7"		# division sign
+dcs="\xe2\x84\x83"		# degree celsius sign
+nmrs="\xe2\x84\x96"		# numero sign
+c_rarw="\xe2\x86\xa3"	# rightwards arrow with tail
+c_lvar="\xe2\x94\x9c"	# light vertical and right
+c_luar="\xe2\x94\x94"	# light up and right
+
+# fonts
+f_dflt="\e[0m"					# default font: remove all modifier
+f_blocktitle="\e[43m\e[1m"		# block title font: bold foreground text (1m) on yellow background (43m)
+f_tfr="\e[30m\e[107m"			# table first row font: black foreground text (30m) on white background (107m)
+f_br="\e[1m\e[31m"				# bold (1m) red (31m) foreground text
+
+#=================================================================================================================================================
+# trap and callback functions
+#=================================================================================================================================================
+print_error()
+{
+	echo -e -n "\e[31m\e[1mERROR\e[0m [code $1]: "
+	case $1 in
+		$exit_sts_no_arg0)
+			echo -e "Input options are missing";;
+		$exit_sts_no_arg1)
+			echo -e "Not enough input options: only the periodic display option defined with the default refresh period of $g_refresh_period sec";;
+		$exit_sts_no_arg2)
+			echo -e "Not enough input options: only the periodic display option defined with the refresh period of $g_refresh_period sec";;
+		$err_sts_bad_arg0)
+			echo -e "Unknown input options: $g_incrct_arg_str";;
+		*)
+			echo "unknown error code"; ;;
+	esac
+	echo "For usage help: $g_title -h"
+}
+
+callback_stop()
+{
+	echo -e -n "\e[0m\e[u" 		# restore cursor position
+	exit 0
+}
+trap callback_stop SIGINT #SIGKILL SIGTSTP SIGQUIT 
+
+callback_exit()
+{
+	echo -e -n "\e[?25h\e[0m" 	# unhide cursor
+	stty echo 					# allow echo input characters
+	# exit error status handler
+	if [ $1 -gt 0 ]; then print_error $1; fi
+}
+trap 'callback_exit $?' EXIT
+
+callback_window_size_changed()
+{
+	g_win_siz_chg=$TRUE
+}
+trap callback_window_size_changed SIGWINCH
+
+#=================================================================================================================================================
+# casting unsigned number to signed
+# @inputs:	$1 - unsigned number, $2 - unsigned number bits amount (default 32)
+#=================================================================================================================================================
+cast2signed()
+{
+	# check input arguments amount and define max, med
+	if [[ $# -eq 1 || ($# -eq 2 && $2 -eq 32) ]]
+	then
+		local max=$g_2pwr32max
+		local med=$g_2pwr32med
+	elif [ $# -eq 2 ]
+	then
+		local max=$(( 2**$2 ))
+		local med=$(( $max/2 ))
+	else
+		echo "cast2signed() error: incorrect amount of input arguments"
+		return 1
+	fi
+
+	# casting $1 to signed decimal
+	local num=$(printf %d $1)
+
+	# print signed value
+	# for return value from the function to value use signed_value="$(cast2signed unsigned_value nbits)"
+	if [ $num -lt $med ]
+	then
+		echo $num
+	elif [ $num -gt $med ]
+	then
+		echo $(( $num-$max ))
+	else # $1==$med
+		echo -$med
+	fi
+
+	return 0
+}
+
+#=================================================================================================================================================
+# print script title
+#=================================================================================================================================================
+print_script_title()
+{
+	#*************************** Local variables definition ***************************
+	local title="\e[42m\e[1m=== ${g_title^^} ===$f_dflt"	# script title font: bold foreground text (1m) on green background (42m)
+
+	#*************************** Function Implementation ***************************
+	
+	echo -e -n  "\e[;H" 		#move cursor to 0;0	
+	echo -en "$title | "
+	if [[ $g_periodic_display != $FALSE ]]
+	then
+		echo -e -n "Refresh period: $g_refresh_period sec | "
+	fi
+	date -u +"System %Z: %d-%b-%Y %T"
+
+	echo -e -n "\e[?25l" 	# hide cursor
+	stty -echo 				# negation echo input characters
+}
+
+#=================================================================================================================================================
+# print SWIFT app status
+#=================================================================================================================================================
+print_swift_status()
+{
+	if [[ $g_print_SWIFT_info == $TRUE ]]
+	then
+		# check if SWIFT application is running (SWIFT must be running for update telemerty data)
+		if [ -z $(pidof SWIFT) ]
+		then
+			echo -e "\e[33m\e[1mWARNING:\e[0m SWIFT application is not running. Some data aren't updating."
+		else
+			echo -e "NOTE: SWIFT application is running."
+		fi
+	fi
+}
+
+#=================================================================================================================================================
+# display unit spec
+#=================================================================================================================================================
+disp_spec()
+{
+	#*************************** Local variables definition ***************************
+	# columns positions and separator line array
+	local cpos[2]=18; local cpos[3]=$((${cpos[2]}+30)); local cpos[4]=$((${cpos[3]}+14));
+	local clmn=("" "" "\r\e[${cpos[2]}C$c_vl" "\r\e[${cpos[3]}C$c_vl" "\r\e[${cpos[4]}C$c_vl")
+
+	# registers address and name
+	local reg_num=(9 10 11 12 13 30 31 32 33)
+	local register=("CPU version year" "CPU version month" "CPU APU SW version" "CPU RPU FW version" "CPU PL HW version"
+					"Zynq UltraScale+ DNA_0" "Zynq UltraScale+ DNA_1" "Zynq UltraScale+ DNA_2" "Wake up timestamp")
+
+	#*************************** Function Implementation ***************************
+	# print title
+	echo -e "$f_blocktitle=== Unit Spec ===$f_dflt"
+
+	# print CPU info @petalinux
+	echo -e "Info @ Petalinux: "
+	echo -e " - CPU Description:\t $(cat /etc/petalinux/product)"
+	echo -e " - CPU Version:    \t $(cat /etc/petalinux/version)"
+
+	# read CPU info registers
+	for i in ${!reg_num[@]}
+	do
+		local reg_addr[$i]=$(printf '0x%X' $((${reg_num[$i]} * 4)))
+		local addr[$i]=$(printf '0x%X' $(($BASEADDR_FALCON_STATUSWATCH + ${reg_addr[$i]})))
+		local value[$i]=$(( 16#$(reg-rw.elf ${addr[$i]} -rx) ))
+	done
+
+	# print CPU info @memory
+	echo -e "Info @ Base Address $BASEADDR_FALCON_STATUSWATCH: "
+	printf " - CPU Version:\t\t %02d.%02d.%02d.%02d.%02d\n" ${value[0]} ${value[1]} ${value[2]} ${value[3]} ${value[4]}
+	printf " - Zynq UltraScale+ DNA: 0x%08X_%08X_%08X\n" ${value[7]} ${value[6]} ${value[5]}
+
+	# print registers table first row
+	echo -e "$f_tfr  $nmrs : Addr : Bits $c_vl Register                    $c_vl Value [hex] $c_vl Value [dec] $f_dflt"
+
+	# print CPU info registers values table
+	for i in ${!reg_num[@]}
+	do
+		case ${reg_num[$i]} in
+			30 | 31 | 32)
+				printf " %2d : 0x%02X : %d$dvsns%d${clmn[2]} %s${clmn[3]} 0x%08X${clmn[4]}\n" ${reg_num[$i]} ${reg_addr[$i]} 0 31 "${register[$i]}" ${value[$i]}; ;;
+			33)
+				printf " %2d : 0x%02X : %d$dvsns%d${clmn[2]} %s${clmn[3]} 0x%X${clmn[4]} %d [%s]\n" ${reg_num[$i]} ${reg_addr[$i]} 0 31 "${register[$i]}" ${value[$i]} ${value[$i]} "$(date +"%Z %d-%b-%Y %T" -d @${value[$i]})"; ;;
+			*)
+				printf " %2d : 0x%02X : %d$dvsns%d${clmn[2]} %s${clmn[3]} 0x%X${clmn[4]} %d\n" ${reg_num[$i]} ${reg_addr[$i]} 0 31 "${register[$i]}" ${value[$i]} ${value[$i]}; ;;
+		esac
+	done
+}
+
+#=================================================================================================================================================
+# display communication status
+#=================================================================================================================================================
+disp_com()
+{
+	#*************************** Local variables definition ***************************
+	# columns positions and separator line array
+	local cpos[2]=18; local cpos[3]=$((${cpos[2]}+38)); local cpos[4]=$((${cpos[3]}+19)); local cpos[5]=$((${cpos[4]}+19));
+	local clmn=("" "" "\r\e[${cpos[2]}C$c_vl" "\r\e[${cpos[3]}C$c_vl" "\r\e[${cpos[4]}C$c_vl" "\r\e[${cpos[5]}C$c_vl")
+
+	# registers address and name
+	local reg_num=(0 1 2 3 4 5 6 8 14 15 41 50 51 52 53 54 55)
+	local bits=(32 32 32 32 32 32 32 32 32 32 56 32 32 32 32 32 32)
+	local register=("Host packet low delay (<20ms)" "Host packet header fail" "Host packet checksum fail" "Host packet length fail" "Host datablock length fail"
+					"Host datablock unknown message" "Host communication" "Unit communication" "FalCon PiCom ticks counter" "FalCon sheduler runtime"
+					"PiCom UTC" "PiCom Rate X" "PiCom Rate Y" "PiCom Rate Z" "PiCom Acc X" "PiCom Acc Y" "PiCom Acc Z")
+	local unit=("" "" "" "" "" "" "" "" "" "[$(printf '%b' $micro)s] : [%]" "[s.$(printf '%b' $micro)s]" "[Rad/s]" "[Rad/s]" "[Rad/s]" "[g]" "[g]" "[g]")
+
+	#*************************** Function Implementation ***************************
+	# print title
+	printf "$f_blocktitle=== Communication Status ===$f_dflt @ Base Address 0x%X\n" $BASEADDR_FALCON_STATUSWATCH
+
+	# print registers table first row
+	echo -e "$f_tfr  $nmrs : Addr : Bits $c_vl Register                            $c_vl Value [hex]      $c_vl Value            $c_vl Unit     $f_dflt"
+
+	# read and print registers values table
+	for i in ${!reg_num[@]}
+	do
+		local reg_addr=$(printf '0x%X' $((${reg_num[$i]} * 4)))
+		local addr=$(printf '0x%X' $(($BASEADDR_FALCON_STATUSWATCH + $reg_addr)))
+		local value=$(( 16#$(reg-rw.elf $addr -rx) ))
+		if (( ${bits[$i]} > 32))
+		then
+			local reg_addrh=$(printf '0x%X' $(( $((${reg_num[$i]}+1)) * 4)))
+			local addrh=$(printf '0x%X' $(($BASEADDR_FALCON_STATUSWATCH + $reg_addrh)))
+			local valueh=$(( 16#$(reg-rw.elf $addrh -rx) ))
+			local value=$(printf '0x%X%X' $valueh $value)
+		fi
+
+		printf " %2d : 0x%02X : %d$dvsns%d${clmn[2]} %s${clmn[3]} 0x%X${clmn[4]} " ${reg_num[$i]} $reg_addr 0 $((${bits[$i]}-1)) "${register[$i]}" $value
+
+		case ${reg_num[$i]} in
+			6 | 8)
+				case $value in
+					0) local valEnum="$value=[Ok]"; 	;;
+					1) local valEnum="$value=[Lost]"; 	;;
+					*) local valEnum="$value=[N.A.]";	;;
+				esac
+				printf "%s${clmn[5]} \n" "$valEnum"  
+				;;
+			15)
+				printf "%d : %.2f${clmn[5]} %s \n" $value $(dc $value 5 div p) "${unit[$i]}"; ;;
+			41)	
+				local us=$(dc $value 1000000 % p)
+				local s=$(dc $value $us - 1000000 / p)
+				printf "%d.%06d${clmn[5]} %s [%s:%06d]\n" $s $us "${unit[$i]}" "$(date +"%Z %d-%b-%Y %T" -d @$s)" $us; ;;
+			50 | 51 | 52) 
+				printf "%.6f${clmn[5]} %s \n" $(dc $(cast2signed $value 32) 1000000 div p) "${unit[$i]}"; ;;
+			53 | 54 | 55) 
+				printf "%.6f${clmn[5]} %s \n" $(dc $(cast2signed $value 32) 1000000 div p) "${unit[$i]}"; ;;
+			*)
+				printf "%d${clmn[5]} \n" $value ; ;;
+		esac
+	done
+
+	# set SWIFT info print flag 
+	g_print_SWIFT_info=$TRUE
+}
+
+#=================================================================================================================================================
+# display video link status
+#=================================================================================================================================================
+disp_video()
+{
+	#*************************** Local variables definition ***************************
+	# columns positions and separator line array
+	local cpos[2]=19; local cpos[3]=$((${cpos[2]}+38));
+	local clmn=("" "" "\r\e[${cpos[2]}C$c_vl" "\r\e[${cpos[3]}C$c_vl" )
+
+	# registers address and name
+	local reg_num=(0 1 2 3 4 5 6 7 8 9 10 11 12 13)
+	local register=("Version" "Date" "Spare_1 [Clear]" "Spare_2 [Halt]" "Aurora core status" "Aurora line lost status" "Aurora line length status" 
+					"Spare_3" "Spare_4" "Reset status" "Aurora line lost counters" "Spare_5" "Spare_6" "Spare_7")
+
+	#*************************** Function Implementation ***************************
+	# print title
+	printf "$f_blocktitle=== Video Link Status ===$f_dflt @ Base Address 0x%X\n" $BASEADDR_VID_STS_REG
+	# print registers table first row
+	echo -e "$f_tfr  $nmrs : Addr : Bits  $c_vl Register                            $c_vl Value [hex] $f_dflt"
+
+	# read and print registers values
+	for i in ${!reg_num[@]}
+	do
+		local reg_addr=$(printf '0x%X' $((${reg_num[$i]} * 4)))
+		local addr=$(printf '0x%X' $(($BASEADDR_VID_STS_REG + $reg_addr)))
+		local value=$(( 16#$(reg-rw.elf $addr -rx) ))
+
+		printf " %2d : 0x%02X :  %d$dvsns%d${clmn[2]} %s${clmn[3]} 0x%X\n" ${reg_num[$i]} $reg_addr 0 31 "${register[$i]}" $value
+
+		# print registers bits according to register address
+		case $reg_addr in
+			0x10)
+				printf " %2d : 0x%02X :  %d$dvsns%d${clmn[2]} $c_lvar %s${clmn[3]} $c_lvar 0x%X\n" ${reg_num[$i]} $reg_addr 0 0 "pll not locked out" $(( $value & 0x1 ))
+				printf " %2d : 0x%02X :  %d$dvsns%d${clmn[2]} $c_lvar %s${clmn[3]} $c_lvar 0x%X\n" ${reg_num[$i]} $reg_addr 1 1 "rx channel up" $(($(( $value & 0x2 ))>>1 ))
+				printf " %2d : 0x%02X :  %d$dvsns%d${clmn[2]} $c_lvar %s${clmn[3]} $c_lvar 0x%X\n" ${reg_num[$i]} $reg_addr 2 2 "rx hard err" $(($(( $value & 0x4 ))>>2 ))
+				printf " %2d : 0x%02X :  %d$dvsns%d${clmn[2]} $c_lvar %s${clmn[3]} $c_lvar 0x%X\n" ${reg_num[$i]} $reg_addr 3 3 "rx lane up" $(($(( $value & 0x8 ))>>3 ))
+				printf " %2d : 0x%02X :  %d$dvsns%d${clmn[2]} $c_luar %s${clmn[3]} $c_luar 0x%X\n" ${reg_num[$i]} $reg_addr 4 4 "rx soft err" $(($(( $value & 0x10 ))>>4 ))
+				;;
+			0x14)
+				printf " %2d : 0x%02X :  %d$dvsns%d${clmn[2]} $c_lvar %s${clmn[3]} $c_lvar 0x%X\n" ${reg_num[$i]} $reg_addr 0 0 "ch#0 [DTV] line lost" $(( $value & 0x1 ))
+				printf " %2d : 0x%02X :  %d$dvsns%d${clmn[2]} $c_lvar %s${clmn[3]} $c_lvar 0x%X\n" ${reg_num[$i]} $reg_addr 1 1 "ch#1 [TI] line lost" $(($(( $value & 0x2 ))>>1 ))
+				printf " %2d : 0x%02X :  %d$dvsns%d${clmn[2]} $c_luar %s${clmn[3]} $c_luar 0x%X\n" ${reg_num[$i]} $reg_addr 2 2 "ch#2 [SWIR] line lost" $(($(( $value & 0x4 ))>>2 ))
+				;;
+			0x18)
+				printf " %2d : 0x%02X :  %d$dvsns%d${clmn[2]} $c_lvar %s${clmn[3]} $c_lvar 0x%X\n" ${reg_num[$i]} $reg_addr 0 0 "ch#0 [DTV] line length error" $(( $value & 0x1 ))
+				printf " %2d : 0x%02X :  %d$dvsns%d${clmn[2]} $c_lvar %s${clmn[3]} $c_lvar 0x%X\n" ${reg_num[$i]} $reg_addr 1 1 "ch#1 [TI] line length error" $(($(( $value & 0x2 ))>>1 ))
+				printf " %2d : 0x%02X :  %d$dvsns%d${clmn[2]} $c_luar %s${clmn[3]} $c_luar 0x%X\n" ${reg_num[$i]} $reg_addr 2 2 "ch#2 [SWIR] line length error" $(($(( $value & 0x4 ))>>2 ))
+				;;
+			0x24)
+				printf " %2d : 0x%02X :  %d$dvsns%d${clmn[2]} $c_luar %s${clmn[3]} $c_luar 0x%X\n" ${reg_num[$i]} $reg_addr 0 0 "Reset Aurora @ 1=[Enable]" $value 
+				;;
+			0x28)
+				printf " %2d : 0x%02X :  %d$dvsns%d${clmn[2]} $c_lvar %s${clmn[3]} $c_lvar 0x%03X\n" ${reg_num[$i]} $reg_addr 0 9 "ch#0 [DTV] line lost counter" $(( $value & 0x3FF ))
+				printf " %2d : 0x%02X : %d$dvsns%d${clmn[2]} $c_lvar %s${clmn[3]} $c_lvar 0x%03X\n" ${reg_num[$i]} $reg_addr 10 19 "ch#1 [TI] line lost counter" $(($(( $value & 0xFFC00 ))>>10 ))
+				printf " %2d : 0x%02X : %d$dvsns%d${clmn[2]} $c_luar %s${clmn[3]} $c_luar 0x%03X\n" ${reg_num[$i]} $reg_addr 20 29 "ch#2 [SWIR] line lost counter" $(($(( $value & 0x3FF00000 ))>>20 ))
+				;;
+		esac
+	done
+
+	# set SWIFT info print flag 
+	g_print_SWIFT_info=$TRUE
+}
+
+#=================================================================================================================================================
+# display telemetry data
+#=================================================================================================================================================
+disp_telemetry ()
+{
+	#*************************** Local variables definition ***************************
+	# columns positions and separator line array
+	local cpos[2]=18; local cpos[3]=$((${cpos[2]}+30)); local cpos[4]=$((${cpos[3]}+19)); local cpos[5]=$((${cpos[4]}+19)); local cpos[6]=$((${cpos[5]}+19));
+	local clmn=("" "" "\r\e[${cpos[2]}C$c_vl" "\r\e[${cpos[3]}C$c_vl" "\r\e[${cpos[4]}C$c_vl" "\r\e[${cpos[5]}C$c_vl" "\r\e[${cpos[6]}C$c_vl")
+
+	# registers address and name
+	local reg_num=(0x0 0x1 0x3 0x4 0x6 0x7 0x8 0xA 0xB 0xC 0xE 0xF 0x10 0x11 0x13 0x14 0x15 0x16 0x17 0x18 0x19 0x1A 0x1F 0x20 0x21 0x22 0x24 0x25 0x29 0x2A 0x2B 0x2C 0x2D)
+	local bits=(32 32 32 32 32 32 64 16 16 8 8 8 16 16 8 8 8 8 16 16 16 16 16 1 5 2 16 16 8 16 8 1 12)
+	local register=("Azimuth Angle" "Elevation Angle" "Azimuth Rate" "Elevation Rate" "Frame Number" "Integration Time" "Time Tag" "Image Size Width" "Image Size Heigh" "Channel Type"
+					"Panorama Strip Number" "Panorama Image Valid" "FOV Horizontal" "FOV Vertical" "Frame Border Left" "Frame Border Right" "Frame Border Top" "Frame Border Bottom"
+					"FOV Horizontal Max" "FOV Horizontal Min" "Boresight Cross X" "Boresight Cross Y" "Frame Rate" "Video Polarity" "Integration Capacitor" "Averaging Mode"
+					"Stabilization Error X" "Stabilization Error Y" "Zoom Status" "ID" "Checksum" "Frame lost [debug]" "Frame lost counter [debug]")
+	local unit=("[$(printf '%b' $micro)Rad]" "[$(printf '%b' $micro)Rad]" "[$(printf '%b' $micro)Rad/s]" "[$(printf '%b' $micro)Rad/s]" ""
+				"[$(printf '%b' $micro)s]" "[$(printf '%b' $micro)s] hex" "[pixel]" "[pixel]" ""
+				"" "" "[deg]" "[deg]" "[pixel]" "[pixel]" "[pixel]" "[pixel]" "[deg]" "[deg]" "[pixel] > 0: Right from center" "[pixel] > 0: Down from center" "[Hz]" "" "" ""
+				"[$(printf '%b' $micro)Rad]" "[$(printf '%b' $micro)Rad]" "" "" "" "" "")
+
+	#*************************** Function Implementation ***************************
+	# print title
+	echo -e -n "$f_blocktitle=== Telemetry Data ===$f_dflt"
+	# print registers table 3 first rows
+	echo -e "\t     $f_tfr @ Video Channel $c_rarw $c_vl chnl#0 [DTV]     $c_vl chnl#1 [TI]      $c_vl chnl#2 [SWIR]$f_dflt"
+	echo -e "\t\t\t\t Base Address $c_rarw $c_vl ${BASEADDR_TLMTRY_CH[0]}\t   $c_vl ${BASEADDR_TLMTRY_CH[1]}       $c_vl ${BASEADDR_TLMTRY_CH[2]}\t"
+	echo -en "$f_tfr  $nmrs : Addr : Bits $c_vl Register                    $c_vl Value @chnl$f_br#0$f_dflt$f_tfr    "
+	echo -e	"$c_vl Value @chnl$f_br#1$f_dflt$f_tfr    $c_vl Value @chnl$f_br#2$f_dflt$f_tfr    $c_vl Units                $f_dflt"
+
+	# read and print registers values
+	for i in ${!reg_num[@]}
+	do
+		# read 32 bit data
+		local reg_addr=$(printf '0x%X' $((${reg_num[$i]} * 4)))
+		for n in ${!BASEADDR_TLMTRY_CH[@]}
+		do
+			local addr[$n]=$(printf '0x%X' $((${BASEADDR_TLMTRY_CH[$n]} + $reg_addr)))
+			local value[$n]=$(( 16#$(reg-rw.elf ${addr[$n]} -rx) ))
+		done
+
+		# if register size not equel 32
+		if (( ${bits[$i]} < 32))
+		then
+			for n in ${!BASEADDR_TLMTRY_CH[@]};	do
+				# clear irrelevant high bits
+				local value[$n]=$((${value[$n]} & $((0xFFFFFFFF >> $((32-${bits[$i]})) )) ))
+			done
+		elif (( ${bits[$i]} == 64))
+		then
+			#read next 32b data and create 64b variable
+			local reg_addrh=$(printf '0x%X' $(( $((${reg_num[$i]}+1)) * 4)))
+			for n in ${!BASEADDR_TLMTRY_CH[@]}; do
+				local addrh[$n]=$(printf '0x%X' $((${BASEADDR_TLMTRY_CH[$n]} + $reg_addrh)))
+				local valueh[$n]=$(( 16#$(reg-rw.elf ${addrh[$n]} -rx) ))
+				local value[$n]=$(printf '0x%X%X' ${valueh[$n]} ${value[$n]})
+			done
+		fi
+
+		# print num, address, bits
+		printf " %2d : 0x%02X : %d$dvsns%d${clmn[2]} %s${clmn[3]} " ${reg_num[$i]} $reg_addr 0 $((${bits[$i]}-1)) "${register[$i]}"
+
+		# convert values and print according to register number
+		case ${reg_num[$i]} in
+			0x0 | 0x1 | 0x19 | 0x1A | 0x24 | 0x25) # cast Az/El Angle&Rate, BS cross X&Y, stabilization error X&Y registers values to signed before print
+				printf "%d${clmn[4]} %d${clmn[5]} %d${clmn[6]} %s\n" $(cast2signed ${value[0]} ${bits[$i]})  $(cast2signed ${value[1]} ${bits[$i]}) $(cast2signed ${value[2]} ${bits[$i]}) "${unit[$i]}"; ;;
+			0x3 | 0x4) # Az, El Rate registers cast to signed, multiply by 10
+				printf "%d${clmn[4]} %d${clmn[5]} %d${clmn[6]} %s\n" $(($(cast2signed ${value[0]} ${bits[$i]})*10))  $(($(cast2signed ${value[1]} ${bits[$i]})*10)) $(($(cast2signed ${value[2]} ${bits[$i]})*10)) "${unit[$i]}"; ;;
+			0x8) # Time Tag register print in hex
+				printf "%X${clmn[4]} %X${clmn[5]} %X${clmn[6]} %s\n" ${value[0]} ${value[1]} ${value[2]} "${unit[$i]}"; ;;
+			0xC) # Channel Type register enum
+				for j in ${!value[@]}; do
+					case ${value[$j]} in
+						1) local chEnum[$j]="${value[$j]}=[TI]"; 		;;
+						2) local chEnum[$j]="${value[$j]}=[DTV]"; 		;;
+						3) local chEnum[$j]="${value[$j]}=[SWIR]";		;;
+						*) local chEnum[$j]="${value[$j]}=[N.A.]";		;;
+					esac; done;
+				printf "%s${clmn[4]} %s${clmn[5]} %s${clmn[6]} %s\n" "${chEnum[0]}" "${chEnum[1]}" "${chEnum[2]}" "${unit[$i]}"; ;;
+			0x10 | 0x11 | 0x17 | 0x18) # FOV registers
+				printf "%.2f${clmn[4]} %.2f${clmn[5]} %.2f${clmn[6]} %s\n" $(dc ${value[0]} 1000 div p) $(dc ${value[1]} 1000 div p) $(dc ${value[2]} 1000 div p) "${unit[$i]}"; ;;
+			0x20) # Video Polarity register enum
+				for j in ${!value[@]}; do
+					case ${value[$j]} in
+						0) local chEnum[$j]="${value[$j]}=[Black Hot]"; ;;
+						1) local chEnum[$j]="${value[$j]}=[White Hot]"; ;;
+						*) local chEnum[$j]="${value[$j]}=[N.A.]";		;;
+					esac; done;
+				printf "%s${clmn[4]} %s${clmn[5]} %s${clmn[6]} %s\n" "${chEnum[0]}" "${chEnum[1]}" "${chEnum[2]}" "${unit[$i]}"; ;;
+			0x21) # Integration Capacitor register enum
+				for j in ${!value[@]}; do
+					case ${value[$j]} in
+						0) local chEnum[$j]="${value[$j]}=[Low Gain]"; 	;;
+						1) local chEnum[$j]="${value[$j]}=[High Gain]"; ;;
+						2) local chEnum[$j]="${value[$j]}=[Med Gain]"; 	;;
+						3) local chEnum[$j]="${value[$j]}=[LNIM]"; 		;;
+						4) local chEnum[$j]="${value[$j]}=[LNIM CDS]";	;;
+						*) local chEnum[$j]="${value[$j]}=[N.A.]";		;;
+					esac; done;
+				printf "%s${clmn[4]} %s${clmn[5]} %s${clmn[6]} %s\n" "${chEnum[0]}" "${chEnum[1]}" "${chEnum[2]}" "${unit[$i]}"; ;;
+			0x22) # Averaging Mode register enum
+				for j in ${!value[@]}; do
+					case ${value[$j]} in
+						0) local chEnum[$j]="${value[$j]}=[No Avrg.]"; 	;;
+						1) local chEnum[$j]="${value[$j]}=[Normal]"; 	;;
+						*) local chEnum[$j]="${value[$j]}=[N.A.]";		;;
+					esac; done;
+				printf "%s${clmn[4]} %s${clmn[5]} %s${clmn[6]} %s\n" "${chEnum[0]}" "${chEnum[1]}" "${chEnum[2]}" "${unit[$i]}"; ;;
+			0x29) # Zoom Status register enum
+				for j in ${!value[@]}; do
+					case ${value[$j]} in
+						1) local chEnum[$j]="${value[$j]}=[Disc.In]"; 	;;
+						2) local chEnum[$j]="${value[$j]}=[Disc.Out]"; 	;;
+						3) local chEnum[$j]="${value[$j]}=[Cont.In]"; 	;;
+						4) local chEnum[$j]="${value[$j]}=[Cont.Out]";	;;
+						*) local chEnum[$j]="${value[$j]}=[N.A.]";		;;
+					esac; done;
+				printf "%s${clmn[4]} %s${clmn[5]} %s${clmn[6]} %s\n" "${chEnum[0]}" "${chEnum[1]}" "${chEnum[2]}" "${unit[$i]}"; ;;
+			0x2B) # Checksum register print in hex
+				printf "0x%X${clmn[4]} 0x%X${clmn[5]} 0x%X${clmn[6]} %s\n" ${value[0]} ${value[1]} ${value[2]} "${unit[$i]}"; ;;
+			*) # default print format
+				printf "%d${clmn[4]} %d${clmn[5]} %d${clmn[6]} %s\n" ${value[0]} ${value[1]} ${value[2]} "${unit[$i]}"; ;;
+		esac
+	done
+
+	# set SWIFT info print flag 
+	g_print_SWIFT_info=$TRUE
+}
+
+#=================================================================================================================================================
+# print hex 32bit as binary at display BITs functions
+#=================================================================================================================================================
+print_hex2bin()
+{
+	local BITS=32
+	local HEX=$1
+	for ((i=BITS-1;i>=0;i--))
+	do
+		if (( $(($i+1))%4 == 0 )); then printf " "; fi
+		local bit=$(( ($HEX>>i)%2 ))
+		if (( $bit == 1 ))
+		then
+			printf "$f_br%d$f_dflt" $bit
+		else
+			printf "%d" $bit
+		fi
+	done
+}
+
+#=================================================================================================================================================
+# cast 32bit number to float
+#=================================================================================================================================================
+cast2float_py()
+{
+	# cast input number to hex 32bit
+	local hex=$(printf "%08X" $1)
+	# print hex 32bit as float
+	echo "$hex" | python3 -c 'import struct; print(struct.unpack("!f", bytes.fromhex(input()))[0])'
+}
+
+cast2float()
+{
+	# cast input number to hex 32bit
+
+	if (( $1 == 0 ))
+	then
+		echo 0
+		return 
+	fi
+
+	local hex=$(printf "%08X" $1)
+	local bias=127
+	local sign=$(($1>>31))
+	local exponent=$(($(($1 & 0x7F800000))>>23))
+	local mantissa=$(($1 & 0x7FFFFF))
+	local dec=0
+
+	for((i=23;i>=0;i--))
+	do
+		local bit=$(( ($mantissa>>i)%2 ))
+		if (( $bit == 1 ))
+		then 
+			local frac=$((2**$i))
+			local dec=$(dc $frac $dec + p)
+		fi
+	done
+
+	local dec=$(dc $dec $((2**23)) / f)
+	local dec=$(dc $dec 1 + f)
+
+	if (( $exponent < $bias ))
+	then
+		local e=$(dc 1 $(( 2**$(($bias-$exponent)) )) / p)
+	else
+		local e=$(( 2**$(($exponent-$bias)) ))
+	fi
+
+	if (( $sign == -1 ))
+	then
+		local s=-1
+	else
+		local s=1
+	fi
+
+	local float=$(dc $s $e $dec * * p)
+
+	# for debug usage only
+	#printf "HEX: 0x%08X, sign: %d, exponent: 0x%X (=> exp part: %f), mantissa: 0x%X (=> dec part: %f), float: %f \n" $1 $sign $exponent $e $mantissa $dec $float
+
+	echo $float
+}
+
+#=================================================================================================================================================
+# display PBIT results
+#=================================================================================================================================================
+disp_pbit()
+{
+	# print title
+	printf "\e[43m\e[1m=== PBIT result and status ===$f_dflt @ Base Address 0x%X\n" ${BASEADDR_BIT[0]}
+
+	# BITs, registers, units definitions
+	local test=("Carrier Si5338 I2C Comunication" "Carrier Si570 I2C Comunication" "Carrier SDI TX I2C Comunication" "Carrier SDI RX I2C Comunication"
+				"SPU Payload Current" "SPU Yoke Current" "SPU Laser Current" "SPU Heater Current" "SPU Payload Voltage" "SPU Yoke Voltage" "SPU Laser Voltage" "SPU Heater Voltage"
+				"SPU Port Expander Outputs" "SPU LPB"
+				"Carrier Power Supply 12V Current" "Carrier Input Voltage" "Carrier Power Supply 1.8V Voltage" "Carrier Power Supply 12V Voltage" "Carrier Power Supply 5V Voltage"
+ 				"Carrier Power Supply 3.3V Voltage" "Carrier Power Supply 2.5V Voltage"
+				"Fan Speed" "MPSOC LPD Temperature" "MPSOC FPD Temperature" "MPSOC PL Temperature" "Carrier Temperature" "Carrier Humidity"
+				"Aurora core: pll_not_locked_out" "Aurora core: rx_channel_up" "Aurora core: rx_hard_err" "Aurora core: rx_lane_up" "Aurora core: rx_soft_err"
+				"Video RX #0: line lost error" "Video RX #1: line lost error" "Video RX #2: line lost error"
+				"Video RX #0: line length error" "Video RX #1: line length error" "Video RX #2: line length error")
+
+	local reg=("PBIT Result #0" "PBIT Result #1" "PBIT Result #2" "PBIT Result #3"
+				"" "${test[4]}" "${test[5]}" "${test[6]}" "${test[7]}" "${test[8]}" "${test[9]}" "${test[10]}" "${test[11]}"
+				""	"${test[14]}" "${test[15]}" "${test[16]}" "${test[17]}" "${test[18]}" "${test[19]}"
+				"${test[20]}" "${test[21]}" "${test[22]}" "${test[23]}" "${test[24]}" "${test[25]}" "${test[26]}" "" )
+
+	local unit=("" "" "" "" "[attempt]" "[A]" "[A]" "[A]" "[A]" "[V]" "[V]" "[V]" "[V]" "" "[A]" "[V]" "[V]" "[V]" "[V]" "[V]" "[V]" "[rpm]"
+				"[$(printf '%b' $dcs) ]" "[$(printf '%b' $dcs) ]" "[$(printf '%b' $dcs) ]" "[$(printf '%b' $dcs) ]" "[%]" "")
+
+	# print result registers title
+	echo -e "\e[30m\e[107m  \xe2\x84\x96 : Addr : Bits $c_vl Result Register $c_vl Value [hex] $c_vl Value [binary]                         $f_dflt"
+
+	# columns positions and column separator line
+	local c2="\r\e[18C$c_vl"; local c3=""$c2"\e[17C$c_vl"; local c4=""$c3"\e[13C$c_vl";
+
+	# print result registers
+	for reg_num in 0 1
+	do
+		local reg_addr=$(printf '0x%X' $(($reg_num * 4)) )
+		local addr=$(printf '0x%X' $((${BASEADDR_BIT[0]} + $reg_addr)))
+		local rlt_value[$reg_num]=$(( 16#$(reg-rw.elf $addr -rx) ))
+		printf " %2d : 0x%02X : %d$dvsns%d $c2 %s$c3 0x%08X$c4" $reg_num $reg_addr 0 31 "${reg[$reg_num]}" ${rlt_value[$reg_num]}
+		print_hex2bin ${rlt_value[$reg_num]}
+		case $reg_num in
+			0) printf " \xe2\x94\x80\xe2\x94\x80\xe2\x95\x96\n"; ;;
+			1) printf " \xe2\x94\x80\xe2\x94\x80\xe2\x95\xa2\n\n"; ;;
+		esac
+	done
+
+	# print status registers title
+	echo -e "\e[30m\e[107m  \xe2\x84\x96 : Addr : Bits  $c_vl Status Register                     $c_vl Value       $c_vl Unit     $f_dflt"
+
+	# columns positions and column separator line
+	local c2="\r\e[19C$c_vl"; local c3=""$c2"\e[37C$c_vl"; local c4=""$c3"\e[13C$c_vl";
+
+	local lines=2;
+	# print status registers
+	for reg_num in {4..27}
+	do
+		# read 32 bit data
+		local reg_addr=$(printf '0x%X' $(($reg_num * 4)) )
+		local addr=$(printf '0x%X' $((${BASEADDR_BIT[0]} + $reg_addr)))
+		local value=$(( 16#$(reg-rw.elf $addr -rx) ))
+
+		# convert values and print according to register address, count lines for up cursor for print test table
+		case $reg_addr in
+			0x10)
+				printf " %2d : 0x%02X :  %d$dvsns%d $c2 %s$c3 %d$c4 %s\n" $reg_num $reg_addr 0 7 "${test[0]}" $(( $value & 0xFF )) "${unit[$reg_num]}"
+				printf " %2d : 0x%02X :  %d$dvsns%d $c2 %s$c3 %d$c4 %s\n" $reg_num $reg_addr 8 15 "${test[1]}" $(( $(( $value>>8)) & 0xFF )) "${unit[$reg_num]}"
+				printf " %2d : 0x%02X : %d$dvsns%d $c2 %s$c3 %d$c4 %s\n" $reg_num $reg_addr 16 23 "${test[2]}" $(( $(($value>>16)) & 0xFF )) "${unit[$reg_num]}"
+				printf " %2d : 0x%02X : %d$dvsns%d $c2 %s$c3 %d$c4 %s\n" $reg_num $reg_addr 24 31 "${test[3]}" $(( $(($value>>24)) & 0xFF )) "${unit[$reg_num]}"
+				local lines=$(( $lines + 4 ))
+				;;
+			0x34)
+				printf " %2d : 0x%02X :  %d$dvsns%d $c2 SPU Port Expander Outputs$c3 0x%X$c4 \n" $reg_num $reg_addr 0 7 $(( $value & 0xFF ))
+				local val=$(( $(( $value>>8 )) & 0xFF ))
+				case $val in
+					0) local valEnum="$val=[No LPB]"; 	;;
+					1) local valEnum="$val=[Ok]"; 		;;
+					2) local valEnum="$val=[Illegal]"; 	;;
+					3) local valEnum="$val=[Fail]";		;;
+					*) local valEnum="$val=[N.A.]";		;;
+				esac
+				printf " %2d : 0x%02X :  %d$dvsns%d $c2 SPU LPB$c3 %s$c4 \n" $reg_num $reg_addr 8 15 "$valEnum"
+				local lines=$(( $lines + 2 ))
+				;;
+			0x6C)
+				printf " %2d : 0x%02X :  %d$dvsns%d $c2 %s$c3 %d$c4 \n" $reg_num $reg_addr 0 0 "${test[27]}" $(( $value & 0x1 ))
+				printf " %2d : 0x%02X :  %d$dvsns%d $c2 %s$c3 %d$c4 \n" $reg_num $reg_addr 1 1 "${test[28]}" $(($(( $value & 0x2 ))>>1 ))
+				printf " %2d : 0x%02X :  %d$dvsns%d $c2 %s$c3 %d$c4 \n" $reg_num $reg_addr 2 2 "${test[29]}" $(($(( $value & 0x4 ))>>2 ))
+				printf " %2d : 0x%02X :  %d$dvsns%d $c2 %s$c3 %d$c4 \n" $reg_num $reg_addr 3 3 "${test[30]}" $(($(( $value & 0x8 ))>>3 ))
+				printf " %2d : 0x%02X :  %d$dvsns%d $c2 %s$c3 %d$c4 \n" $reg_num $reg_addr 4 4 "${test[31]}" $(($(( $value & 0x10 ))>>4 ))
+				printf " %2d : 0x%02X :  %d$dvsns%d $c2 %s$c3 %d$c4 \n" $reg_num $reg_addr 5 5 "${test[32]}" $(($(( $value & 0x20 ))>>5 ))
+				printf " %2d : 0x%02X :  %d$dvsns%d $c2 %s$c3 %d$c4 \n" $reg_num $reg_addr 6 6 "${test[33]}" $(($(( $value & 0x40 ))>>6 ))
+				printf " %2d : 0x%02X :  %d$dvsns%d $c2 %s$c3 %d$c4 \n" $reg_num $reg_addr 7 7 "${test[34]}" $(($(( $value & 0x80 ))>>7 ))
+				printf " %2d : 0x%02X :  %d$dvsns%d $c2 %s$c3 %d$c4 \n" $reg_num $reg_addr 8 8 "${test[35]}" $(($(( $value & 0x100 ))>>8 ))
+				printf " %2d : 0x%02X :  %d$dvsns%d $c2 %s$c3 %d$c4 \n" $reg_num $reg_addr 9 9 "${test[36]}" $(($(( $value & 0x200 ))>>9 ))
+				printf " %2d : 0x%02X : %d$dvsns%d $c2 %s$c3 %d$c4 \n" $reg_num $reg_addr 10 10 "${test[37]}" $(($(( $value & 0x400 ))>>10 ))
+				local lines=$(( $lines + 11 ))
+				;;
+			*)
+				printf " %2d : 0x%02X :  %d$dvsns%d $c2 %s$c3 %.3f$c4 %s\n" $reg_num $reg_addr 0 31 "${reg[$reg_num]}" $(cast2float $value) "${unit[$reg_num]}"
+				local lines=$(( $lines + 1 ))
+				;;
+		esac
+		#local reg_num=$(($reg_num + 1))
+	done
+
+	# columns positions and column separator line
+	local c1="\r\e[90C"; local c2=""$c1"\e[10C$c_vl"; local c3=""$c2"\e[37C$c_vl";
+
+	# print test title
+	echo -e "\e["$lines"A"$c1"\e[4C\xe2\x95\x91"
+	echo -e "$c1\e[30m\e[107m  \xe2\x84\x96 : Bit $c_vl Test                                $c_vl Result$f_dflt"
+
+	# print test & results
+	for t in ${!test[@]}
+	do
+		local reg=$(( $t / 32 ))
+		local bit=$(( $t - $(( $reg * 32 )) ))
+		printf "$c1 %2d : %2d$c2 %s $c3 " $reg $bit "${test[$t]}"
+		local res=$(( $(( ${rlt_value[$reg]} >> $bit )) & 0x1 ))
+		if (( $res == 0 ))
+		then
+			printf "Pass \n"
+		elif (( $res == 1 ))
+		then
+			printf "\e[31m\e[1mFail$f_dflt \n"
+		else
+			printf "read error \n"
+		fi
+	done
+}
+
+#=================================================================================================================================================
+# display last CBIT results
+#=================================================================================================================================================
+disp_cbit()
+{
+	# print title
+	printf "\e[43m\e[1m=== CBIT result and status ===$f_dflt @ Base Address 0x%X\n" ${BASEADDR_BIT[1]}
+
+	# BITs, registers, units definitions
+	local test=("Carrier Si5338 I2C Comunication" "Carrier Si570 I2C Comunication" "Carrier SDI TX I2C Comunication" "Carrier SDI RX I2C Comunication"
+				"SPU Payload Current" "SPU Yoke Current" "SPU Laser Current" "SPU Heater Current" "SPU Payload Voltage" "SPU Yoke Voltage" "SPU Laser Voltage" "SPU Heater Voltage"
+				"SPU Port Expander Outputs" "SPU LPB"
+				"Carrier Power Supply 12V Current" "Carrier Input Voltage" "Carrier Power Supply 1.8V Voltage" "Carrier Power Supply 12V Voltage" "Carrier Power Supply 5V Voltage"
+ 				"Carrier Power Supply 3.3V Voltage" "Carrier Power Supply 2.5V Voltage"
+				"Fan Speed" "MPSOC LPD Temperature" "MPSOC FPD Temperature" "MPSOC PL Temperature" "Carrier Temperature" "Carrier Humidity"
+				"Aurora core: pll_not_locked_out" "Aurora core: rx_channel_up" "Aurora core: rx_hard_err" "Aurora core: rx_lane_up" "Aurora core: rx_soft_err"
+				"Video RX #0: line lost error" "Video RX #1: line lost error" "Video RX #2: line lost error"
+				"Video RX #0: line length error" "Video RX #1: line length error" "Video RX #2: line length error")
+
+	local reg=("CBIT Result #0" "CBIT Result #1" "CBIT Result #2" "CBIT Result #3"
+				"" "${test[4]}" "${test[5]}" "${test[6]}" "${test[7]}" "${test[8]}" "${test[9]}" "${test[10]}" "${test[11]}"
+				""	"${test[14]}" "${test[15]}" "${test[16]}" "${test[17]}" "${test[18]}" "${test[19]}"
+				"${test[20]}" "${test[21]}" "${test[22]}" "${test[23]}" "${test[24]}" "${test[25]}" "${test[26]}" "" )
+
+	local unit=("" "" "" "" "[attempt]" "[A]" "[A]" "[A]" "[A]" "[V]" "[V]" "[V]" "[V]" "" "[A]" "[V]" "[V]" "[V]" "[V]" "[V]" "[V]" "[rpm]"
+				"[$(printf '%b' $dcs) ]" "[$(printf '%b' $dcs) ]" "[$(printf '%b' $dcs) ]" "[$(printf '%b' $dcs) ]" "[%]" "")
+
+	# print result registers title
+	echo -e "\e[30m\e[107m  \xe2\x84\x96 : Addr : Bits $c_vl Result Register $c_vl Value [hex] $c_vl Value [binary]                         $f_dflt"
+
+	# columns positions and column separator line
+	local c2="\r\e[18C$c_vl"; local c3=""$c2"\e[17C$c_vl"; local c4=""$c3"\e[13C$c_vl";
+
+	# print result registers
+	for reg_num in 0 1
+	do
+		local reg_addr=$(printf '0x%X' $(($reg_num * 4)) )
+		local addr=$(printf '0x%X' $((${BASEADDR_BIT[1]} + $reg_addr)))
+		local rlt_value[$reg_num]=$(( 16#$(reg-rw.elf $addr -rx) ))
+		printf " %2d : 0x%02X : %d$dvsns%d $c2 %s$c3 0x%08X$c4" $reg_num $reg_addr 0 31 "${reg[$reg_num]}" ${rlt_value[$reg_num]}
+		print_hex2bin ${rlt_value[$reg_num]}
+		case $reg_num in
+			0) printf " \xe2\x94\x80\xe2\x94\x80\xe2\x95\x96\n"; ;;
+			1) printf " \xe2\x94\x80\xe2\x94\x80\xe2\x95\xa2\n\n"; ;;
+		esac
+	done
+
+	# print status registers title
+	echo -e "\e[30m\e[107m  \xe2\x84\x96 : Addr : Bits  $c_vl Status Register                     $c_vl Value       $c_vl Unit     $f_dflt"
+
+	# columns positions and column separator line
+	local c2="\r\e[19C$c_vl"; local c3=""$c2"\e[37C$c_vl"; local c4=""$c3"\e[13C$c_vl";
+
+	local lines=2;
+	# print status registers
+	for reg_num in {5..27}
+	do
+		# read 32 bit data
+		local reg_addr=$(printf '0x%X' $(($reg_num * 4)) )
+		local addr=$(printf '0x%X' $((${BASEADDR_BIT[1]} + $reg_addr)))
+		local value=$(( 16#$(reg-rw.elf $addr -rx) ))
+
+		# convert values and print according to register address, count lines for up cursor for print test table
+		case $reg_addr in
+			0x10)
+				printf " %2d : 0x%02X :  %d$dvsns%d $c2 %s$c3 %d$c4 %s\n" $reg_num $reg_addr 0 7 "${test[0]}" $(( $value & 0xFF )) "${unit[$reg_num]}"
+				printf " %2d : 0x%02X :  %d$dvsns%d $c2 %s$c3 %d$c4 %s\n" $reg_num $reg_addr 8 15 "${test[1]}" $(( $(( $value>>8)) & 0xFF )) "${unit[$reg_num]}"
+				printf " %2d : 0x%02X : %d$dvsns%d $c2 %s$c3 %d$c4 %s\n" $reg_num $reg_addr 16 23 "${test[2]}" $(( $(($value>>16)) & 0xFF )) "${unit[$reg_num]}"
+				printf " %2d : 0x%02X : %d$dvsns%d $c2 %s$c3 %d$c4 %s\n" $reg_num $reg_addr 24 31 "${test[3]}" $(( $(($value>>24)) & 0xFF )) "${unit[$reg_num]}"
+				local lines=$(( $lines + 4 ))
+				;;
+			0x34)
+				printf " %2d : 0x%02X :  %d$dvsns%d $c2 SPU Port Expander Outputs$c3 0x%X$c4 \n" $reg_num $reg_addr 0 7 $(( $value & 0xFF ))
+				local val=$(( $(( $value>>8 )) & 0xFF ))
+				case $val in
+					0) local valEnum="$val=[No LPB]"; 	;;
+					1) local valEnum="$val=[Ok]"; 		;;
+					2) local valEnum="$val=[Illegal]"; 	;;
+					3) local valEnum="$val=[Fail]";		;;
+					*) local valEnum="$val=[N.A.]";		;;
+				esac
+				printf " %2d : 0x%02X :  %d$dvsns%d $c2 SPU LPB$c3 %s$c4 \n" $reg_num $reg_addr 8 15 "$valEnum"
+				local lines=$(( $lines + 2 ))
+				;;
+			0x6C)
+				printf " %2d : 0x%02X :  %d$dvsns%d $c2 %s$c3 %d$c4 \n" $reg_num $reg_addr 0 0 "${test[27]}" $(( $value & 0x1 ))
+				printf " %2d : 0x%02X :  %d$dvsns%d $c2 %s$c3 %d$c4 \n" $reg_num $reg_addr 1 1 "${test[28]}" $(($(( $value & 0x2 ))>>1 ))
+				printf " %2d : 0x%02X :  %d$dvsns%d $c2 %s$c3 %d$c4 \n" $reg_num $reg_addr 2 2 "${test[29]}" $(($(( $value & 0x4 ))>>2 ))
+				printf " %2d : 0x%02X :  %d$dvsns%d $c2 %s$c3 %d$c4 \n" $reg_num $reg_addr 3 3 "${test[30]}" $(($(( $value & 0x8 ))>>3 ))
+				printf " %2d : 0x%02X :  %d$dvsns%d $c2 %s$c3 %d$c4 \n" $reg_num $reg_addr 4 4 "${test[31]}" $(($(( $value & 0x10 ))>>4 ))
+				printf " %2d : 0x%02X :  %d$dvsns%d $c2 %s$c3 %d$c4 \n" $reg_num $reg_addr 5 5 "${test[32]}" $(($(( $value & 0x20 ))>>5 ))
+				printf " %2d : 0x%02X :  %d$dvsns%d $c2 %s$c3 %d$c4 \n" $reg_num $reg_addr 6 6 "${test[33]}" $(($(( $value & 0x40 ))>>6 ))
+				printf " %2d : 0x%02X :  %d$dvsns%d $c2 %s$c3 %d$c4 \n" $reg_num $reg_addr 7 7 "${test[34]}" $(($(( $value & 0x80 ))>>7 ))
+				printf " %2d : 0x%02X :  %d$dvsns%d $c2 %s$c3 %d$c4 \n" $reg_num $reg_addr 8 8 "${test[35]}" $(($(( $value & 0x100 ))>>8 ))
+				printf " %2d : 0x%02X :  %d$dvsns%d $c2 %s$c3 %d$c4 \n" $reg_num $reg_addr 9 9 "${test[36]}" $(($(( $value & 0x200 ))>>9 ))
+				printf " %2d : 0x%02X : %d$dvsns%d $c2 %s$c3 %d$c4 \n" $reg_num $reg_addr 10 10 "${test[37]}" $(($(( $value & 0x400 ))>>10 ))
+				local lines=$(( $lines + 11 ))
+				;;
+			*)
+				printf " %2d : 0x%02X :  %d$dvsns%d $c2 %s$c3 %.3f$c4 %s\n" $reg_num $reg_addr 0 31 "${reg[$reg_num]}" $(cast2float $value) "${unit[$reg_num]}"
+				local lines=$(( $lines + 1 ))
+				;;
+		esac
+		#local reg_num=$(($reg_num + 1))
+	done
+
+	# columns positions and column separator line
+	local c1="\r\e[90C"; local c2=""$c1"\e[10C$c_vl"; local c3=""$c2"\e[37C$c_vl";
+
+	# print test title
+	echo -e "\e["$lines"A"$c1"\e[4C\xe2\x95\x91"
+	echo -e "$c1\e[30m\e[107m  \xe2\x84\x96 : Bit $c_vl Test                                $c_vl Result$f_dflt"
+
+	# print test & results
+	for ((t=4; t<${#test[@]}; t++))
+	do
+		local reg_num=$(( $t / 32 ))
+		local bit=$(( $t - $(( $reg_num * 32 )) ))
+		printf "$c1 %2d : %2d$c2 %s $c3 " $reg_num $bit "${test[$t]}"
+		local res=$(( $(( ${rlt_value[$reg_num]} >> $bit )) & 0x1 ))
+		if (( $res == 0 ))
+		then
+			printf "Pass \n"
+		elif (( $res == 1 ))
+		then
+			printf "\e[31m\e[1mFail$f_dflt \n"
+		else
+			printf "read error \n"
+		fi
+	done
+}
+
+#=================================================================================================================================================
+# display last IBIT results
+#=================================================================================================================================================
+disp_ibit()
+{
+	# print title
+	printf "\e[43m\e[1m=== IBIT result and status ===$f_dflt @ Base Address 0x%X\n" ${BASEADDR_BIT[1]}
+	printf "\e[43m\e[1m=== TBD ===$f_dflt \n"
+
+	# set SWIFT info print flag 
+	g_print_SWIFT_info=$TRUE
+}
+
+### display all BITs results
+disp_bits()
+{
+	disp_pbit
+	disp_cbit
+	disp_ibit
+}
+
+### display all available statuses
+disp_all()
+{
+	clear
+	print_script_title
+	disp_spec
+	disp_com
+	disp_video
+	disp_telemetry
+	disp_bits
+	print_swift_status
+	exit 0
+}
+
+#=================================================================================================================================================
+# display script version, help
+#=================================================================================================================================================
+disp_version()
+{
+	echo "$g_title version: $g_version ($g_vdate)"
+	if [ $# -eq 0 ]; then exit 0; fi	# if no inpit arguments then exit script
+}
+
+disp_help()
+{
+	disp_version no_exit
+	echo
+	echo "Description: the script reads and prints PS and PL memory status registers"
+	echo "Depends on: reg-rw.elf ADDRESS -r*"
+	echo
+	echo "Usage: $g_title [options]"
+	echo
+	echo "Options:"
+	echo -e " -a,  --all \t\t display all available statuses"
+	echo -e " -s,  --spec \t\t display unit spec"
+	echo -e " -l,  --video-link\t display video link status"
+	echo -e " -c,  --com \t\t display communication status"
+	echo -e " -t,  --telemetry \t display telemetry data"
+	echo -e " -b,  --bit \t\t display all BITs result and status"
+	echo -e " -pb, --pbit \t\t display PBIT result and status"
+	echo -e " -cb, --cbit \t\t display last CBIT result and status"
+	echo -e " -ib, --ibit \t\t display last IBIT result and status"
+	echo -e " -p [sec/.msec]\t\t display required statuses each [sec/.msec] (*)"
+	echo -e " -v,  --version \t display version information"
+	echo -e " -h,  --help \t\t display help information"
+	echo
+	echo "Hotkeys:"
+	echo -e "  ctrl+c \t\t exit"
+	echo
+	echo "(*) - up to three digits time value in seconds, e.g. -p 3, or milliseconds, e.g. -p .675;"
+	echo "      for default period $g_refresh_period_default sec enter -p only"
+	exit 0
+}
+
+#=================================================================================================================================================
+# debug test
+#=================================================================================================================================================
+debug_test()
+{
+	echo -e ">>> DEBUG TEST START: test cast2float() <<< \n"
+
+	#local num=$(( 16#$(reg-rw.elf 0x3000FC38 -rx) )) 
+	#local hex=$(printf "%08X" $num)
+
+	local addr=(0x3000FC14 0x3000FC38 0x3000FC3C 0x3000FC40 0x3000FC44 0x3000FC48 0x3000FC4C 0x3000FC50)
+	
+	for i in ${!addr[@]}
+	do
+		local num=$(( 16#$(reg-rw.elf ${addr[$i]} -rx) ))
+		#cast2float $num
+		printf "Addr: 0x%08X, HEX: 0x%08X, float (py): %f,  float (my): %f \n" "${addr[$i]}" "$num" $(cast2float_py $num) $(cast2float $num)
+	done
+
+	echo -e "\n>>> DEBUG TEST END <<<"
+	exit 0
+}
+
+#=================================================================================================================================================
+# main
+#=================================================================================================================================================
+# check if input options are missing
+[[ $# -eq 0 ]] && exit $exit_sts_no_arg0
+
+# scan input arguments options
+g_nxt_arg_indx=2
+g_skip_next_arg=$FALSE
+
+for arg in "$@"
+do
+	case $arg in
+		-h | --help)
+			flg_disp_hlp=$TRUE ;;
+		-v | --version)
+			flg_disp_ver=$TRUE ;;
+		-a | --all)
+			flg_disp_all=$TRUE ;;
+		-dbg)
+			flg_debug_test=$TRUE ;;
+		-s | --spec)
+			[[ ! " ${g_blocks_str[@]} " =~ " flg_disp_spec " ]] && g_blocks_str="${g_blocks_str}flg_disp_spec "	;;
+		-l | --video-link)
+			[[ ! " ${g_blocks_str[@]} " =~ " flg_disp_vlink " ]] && g_blocks_str="${g_blocks_str}flg_disp_vlink "	;;
+		-c | --com)
+			[[ ! " ${g_blocks_str[@]} " =~ " flg_disp_com " ]] && g_blocks_str="${g_blocks_str}flg_disp_com "		;;
+		-t | --telemetry)
+			[[ ! " ${g_blocks_str[@]} " =~ " flg_disp_telemetry " ]] && g_blocks_str="${g_blocks_str}flg_disp_telemetry "	;;
+		-b | --bit)
+			[[ ! " ${g_blocks_str[@]} " =~ " flg_disp_bit " ]] && g_blocks_str="${g_blocks_str}flg_disp_bit "		;;
+		-pb | --pbit)
+			[[ ! " ${g_blocks_str[@]} " =~ " flg_disp_pbit " ]] && g_blocks_str="${g_blocks_str}flg_disp_pbit "	;;
+		-cb | --cbit)
+			[[ ! " ${g_blocks_str[@]} " =~ " flg_disp_cbit " ]] && g_blocks_str="${g_blocks_str}flg_disp_cbit "	;;
+		-ib | --ibit)
+			[[ ! " ${g_blocks_str[@]} " =~ " flg_disp_ibit " ]] && g_blocks_str="${g_blocks_str}flg_disp_ibit "	;;
+		-p)
+			# set default periodic display period
+			g_refresh_period=$g_refresh_period_default
+			[[ $g_refresh_period =~ ^\. ]] && g_periodic_display=$mSEC || g_periodic_display=$SEC		
+
+			# if input arguments size = 1, i.e. -p only, then exit with error
+			[[ $# -eq 1 ]] && exit $exit_sts_no_arg1
+
+		 	if [[ ${!g_nxt_arg_indx} =~ ^[0-9]{1,3}$ ]] # if next argument of -p it is three digits integer number
+		 	then
+				g_periodic_display=$SEC		 		
+				g_refresh_period=${!g_nxt_arg_indx}
+		 		g_skip_next_arg=$TRUE
+			elif [[ ${!g_nxt_arg_indx} =~ ^\.[0-9]{1,3}$ ]] # if next argument of -p it is three digits integer number with dot at the begginig
+			then
+				g_periodic_display=$mSEC
+				g_refresh_period=${!g_nxt_arg_indx}	 		
+		 		g_skip_next_arg=$TRUE
+		 	fi
+
+		 	echo "Periodic display refresh period: $g_refresh_period $g_periodic_display"
+
+			if [[ $# -eq 2 ]] && [[ $g_skip_next_arg == $TRUE ]]; then exit $exit_sts_no_arg2; fi # if input arguments size = 2 i.e. -p [seconds] then exit with error
+		 	;;
+		 *)
+			if [[ $g_skip_next_arg == $FALSE ]] 
+			then
+				g_incrct_arg_str="${g_incrct_arg_str}$arg " 
+			elif [[ $g_skip_next_arg == $TRUE ]]
+			then
+				g_skip_next_arg=$FALSE
+			fi
+			;;
+	esac
+	g_nxt_arg_indx=$(($g_nxt_arg_indx + 1))
+done
+
+# print requered options
+# print non-periodic arguments options
+[[ -n $flg_debug_test ]] && debug_test
+[[ -n $flg_disp_hlp ]] && disp_help
+[[ -n $flg_disp_ver ]] && disp_version
+[[ -n $flg_disp_all ]] && disp_all
+
+# print periodic arguments options
+while true
+do
+	# if periodic arguments options detected
+	if [[ -n "$g_blocks_str" ]]
+	then
+		# clear terminal if window size changed
+		if [[ $g_win_siz_chg == $TRUE ]]; then clear; g_win_siz_chg=$FALSE; fi
+
+		# print header
+		print_script_title
+	
+		# print required status watch segments
+		for block in $g_blocks_str
+		do
+			case $block in
+				flg_disp_spec) disp_spec;;
+				flg_disp_vlink) disp_video;;
+				flg_disp_com) disp_com;;
+				flg_disp_telemetry) disp_telemetry;;
+				flg_disp_bit) disp_bits;;
+				flg_disp_pbit) disp_pbit;;
+				flg_disp_cbit) disp_cbit;;
+				flg_disp_ibit) disp_ibit;;
+				*) echo "never happens error #1";;
+			esac
+		done
+
+		# print footer
+		#for c in {0..120}; do echo -en "$c_hl"; done
+		print_swift_status
+
+	else
+		g_periodic_display=$FALSE
+	fi 
+
+	# print incorrect input arguments
+	if [[ -n "$g_incrct_arg_str" ]]; then print_error $err_sts_bad_arg0; fi
+	
+	# Save cursor position (cursor position will restore in callback_stop() )
+	echo -e -n '\e[s'
+
+	# sleep or break 
+	[[ $g_periodic_display == $FALSE ]] && break
+
+	if [[ $g_periodic_display == $SEC ]]
+	then
+		sleep $g_refresh_period
+	elif [[ $g_periodic_display == $mSEC ]]
+	then 
+		usleep $(( $(echo $g_refresh_period | cut -c 2-)*1000 ))
+	fi
+done
+
+exit $?
+
+

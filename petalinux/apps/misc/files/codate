@@ -1,0 +1,269 @@
+#!/bin/bash
+
+# File name: 		codate (controp date shell script)
+# Author:			Kostya A.
+# Date Modified:	07/12/2020
+# Description: 		The script main functions: 
+#					- display unit clocks: system clock, system uptime, RTC, ETC, wake up timestamp 
+#					  	(wake up timestamp inited by RPU Status Watch)
+#					- update unit clocks from remote HOST_IP in the following order:
+#						1. system clock updates from remore host rdate server
+#						2. RTC clock updates from system clock 
+#						3. Wake up timestamp register updates from ETC time
+#					Depends on next commands: date, ping, hwclock, rdate, rdate server on remote host
+
+#=================================================================================================================================================
+# global variables
+#=================================================================================================================================================
+readonly g_DEFAULT_HOST_IP="192.168.0.100"
+readonly g_VERSION=v0.2
+readonly g_VERSION_DATE=07-Dec-2020
+readonly g_TITLE=codate
+readonly FALSE=0
+readonly TRUE=1
+
+readonly BASEADDR_FALCON_STATUSWATCH=0x3000FF00						# RPU-APU statuswatch base address see FalCon lscript.ld
+readonly STATUSWATCH_WAKEUP_TIMESTAMP_REG=33						# see FalCon status_watch.h
+readonly XPAR_XRTCPSU_0_BASEADDR=0xFFA60000							# see FalCon xparameters.h
+readonly XRTC_CUR_TIME_OFFSET=0x00000010							# see FalCon xrtcpsu_hw.h
+
+# exit return status codes
+readonly exit_sts_no_arg0=10
+readonly exit_sts_unk_arg0=11
+readonly exit_sts_bad_address=21
+readonly exit_sts_no_ping=22
+readonly exit_sts_no_rdate_server=23
+
+#=================================================================================================================================================
+# trap and callback functions
+#=================================================================================================================================================
+set -e
+
+callback_exit()
+{
+	# exit error status handler
+	if [ $1 -gt 0 ]
+	then
+		echo -e -n "\e[31m\e[1mERROR\e[0m [code $1]: "
+
+		case $1 in
+			$exit_sts_no_arg0)
+				echo -e "input options are missing"; ;;
+			$exit_sts_unk_arg0)
+				echo -e "unknown input options"; ;;
+			$exit_sts_bad_address)
+				echo -e "host ip bad address"; ;;
+			$exit_sts_no_ping)
+				echo -e "no ping answer from host"; ;;
+			$exit_sts_no_rdate_server)
+				echo -e "rdate server is not running on host"; ;;
+			*)
+				echo "undefined error code"; ;;
+		esac
+
+		echo "For usage help: $g_title -h"
+	fi
+}
+trap 'callback_exit $?' EXIT
+
+#=================================================================================================================================================
+# print current unit clocks
+#=================================================================================================================================================
+print_ctime() 
+{
+	echo -e "\e[1mCurrent unit clocks status:\e[0m"
+	# print Linux system time
+	echo -e "System time:\t $(date -u +"%Z %d-%b-%Y %T")"
+	# print Linux system uptime
+	local uptime_output=$(uptime)
+	local f=load
+	local x="${uptime_output%%$f*}"
+	[[ "$x" = "$uptime_output" ]] || local p=${#x}
+	echo -e "System uptime:\t $(uptime | cut -c 11-$(( $p-3 )))" 
+	# read Zynq RTC time
+	local rtc_cur_time_address=$(printf '0x%X' $(($XPAR_XRTCPSU_0_BASEADDR + $XRTC_CUR_TIME_OFFSET)))
+	local rtc_cur_time=$(reg-rw.elf $rtc_cur_time_address -rd) 
+	# calculate ETC
+	local wakeup_timestamp_offset=$(printf '0x%X' $(($STATUSWATCH_WAKEUP_TIMESTAMP_REG * 4)))
+	local wakeup_timestamp_address=$(printf '0x%X' $(($BASEADDR_FALCON_STATUSWATCH + $wakeup_timestamp_offset)))
+	local wakeup_timestamp=$(reg-rw.elf $wakeup_timestamp_address -rd) 
+	local etc=$(( $rtc_cur_time-$wakeup_timestamp ))
+	# print Zynq RTC 
+	printf "RTC time:\t %s\t\t [Address: 0x%08X | Value: 0x%08X] \n" "$(date -u +"%Z %d-%b-%Y %T" -d @${rtc_cur_time})" "$rtc_cur_time_address" "$rtc_cur_time"
+	# print wake up time
+	printf "Wake up time:\t %s\t\t [Address: 0x%08X | Value: 0x%08X] \n" "$(date -u +"%Z %d-%b-%Y %T" -d @${wakeup_timestamp})" "$wakeup_timestamp_address" "$wakeup_timestamp" 
+	# print ETC
+	printf "ETC time:\t %d:%02d:%02d [H:M:S], total %d sec\n" $(($etc/3600)) $(( ($etc%3600)/60 )) $(($etc%60)) $etc
+	if (( $wakeup_timestamp == 0 ))
+		then
+		echo -e "\e[33m\e[1mWARNING\e[0m: Wake up time register wasn't initialized, therefore ETC time is incorrect."
+	fi
+}
+
+#=================================================================================================================================================
+# get time from remote HOST_IP and update unit system time, RTC module time, PWR_ON_TIMESTAMP register
+#=================================================================================================================================================
+get_time_and_update()
+{
+	echo
+	print_ctime
+	
+	# check ping to host
+	if [ -n "$1" ]
+		then
+			host_ip="$1"
+		else
+			host_ip=$g_DEFAULT_HOST_IP
+	fi	
+	echo -e "Get time from remote host and \e[1mupdate unit clocks:\e[0m"
+	echo -e "Check communication with host $host_ip" 
+	
+	local ping_output=$(ping -c 1 -w 1 $host_ip)
+
+	if [ -n "$ping_output" ]
+		then
+		local ping_res=$(echo "$ping_output" | grep -E -o '[0-9] packets received' | cut -f1 -d' ')
+		else
+		echo "Exit without update unit clocks"
+		return $exit_sts_bad_address
+	fi
+
+	if [ $ping_res -eq 0 ]
+		then
+		echo -e "$ping_output"
+		echo "No answer from $host_ip"
+		echo "Exit without update unit clocks"
+		return $exit_sts_no_ping
+	fi
+	
+	echo "Ping to host $host_ip is OK"
+
+	# check if host rdate server is running
+	local rdate_output=$(rdate -p $host_ip)
+
+	if [ -z "$rdate_output" ]
+		then
+		echo "Host rdate server is not running"
+		echo "Exit without update unit clocks"
+		return $exit_sts_no_rdate_server
+	fi
+
+	echo -e "Host time: $rdate_output"
+
+	# calculate ETC value
+	# read Zynq RTC time
+	local rtc_cur_time_address=$(printf '0x%X' $(($XPAR_XRTCPSU_0_BASEADDR + $XRTC_CUR_TIME_OFFSET)))
+	local rtc_cur_time=$(reg-rw.elf $rtc_cur_time_address -rd) 
+	# calculate ETC
+	local wakeup_timestamp_offset=$(printf '0x%X' $(($STATUSWATCH_WAKEUP_TIMESTAMP_REG * 4)))
+	local wakeup_timestamp_address=$(printf '0x%X' $(($BASEADDR_FALCON_STATUSWATCH + $wakeup_timestamp_offset)))
+	local wakeup_timestamp=$(reg-rw.elf $wakeup_timestamp_address -rd) 
+	local etc=$(( $rtc_cur_time-$wakeup_timestamp ))
+
+	# update system time
+	echo -e "Update System time from Host time\t\t\t [rdate -s $host_ip]"
+	rdate -s $host_ip
+
+	# update RTC
+	echo -e "Update RTC from System time\t\t\t\t [hwclock -w]"
+	hwclock -w
+
+	#update ETC uptime register
+	echo -e -n "Update ETC wake up timestamp register"
+	if (( $wakeup_timestamp == 0 ))
+		then
+		echo -e "\n\e[33m\e[1mWARNING\e[0m: Wake up time register wasn't initialized, therefore will not be updated."
+		else
+		# read Zynq RTC time
+		local rtc_cur_time=$(reg-rw.elf $rtc_cur_time_address -rd) 
+		# calculate Wake up timestamp
+		local wakeup_timestamp=$(printf '0x%08X' $(( $rtc_cur_time-$etc )))
+		#write Wake up timestamp register
+		printf "\t\t\t [%s]\n" "$(reg-rw.elf $wakeup_timestamp_address $wakeup_timestamp)"
+	fi
+
+	echo -e "Update of unit clocks is \e[1mDONE\e[0m "
+
+	# print new clocks 
+	print_ctime
+}
+
+#=================================================================================================================================================
+# print script version, help
+#=================================================================================================================================================
+print_version()
+{
+	echo "$g_TITLE version: $g_VERSION ($g_VERSION_DATE)"
+}
+
+print_help()
+{
+	print_version
+	echo
+	echo "Description: the script display unit clocks or update them from remote HOST_IP"
+	echo "Depends on: date, ping, hwclock, rdate, rdate server on remote host"
+	echo
+	echo "Usage: $g_TITLE [option] [HOST_IP]"
+	echo
+	echo "Option(single only):"
+	echo -e " -p,  --print\t\t print current unit clocks"
+	echo -e " -u,  --update\t\t update unit clocks from remote HOST_IP (*)"
+	echo -e " -v,  --version\t\t print version information"
+	echo -e " -h,  --help\t\t print help information"
+	echo -e " -hs, --help-server\t print help information how to configure host date server"
+	echo
+	echo -e "Default [option] value:\t -p "
+	echo -e "Default [HOST_IP] value: $g_DEFAULT_HOST_IP"
+	echo
+	echo "(*) RTC and Wake up timestamp will be updated from system time also in case of system time matches host time"
+}
+
+print_help_server()
+{
+	echo "Host time server help:"
+	echo "1) for update time on Linux host run: sudo date -s \"\$(wget -qSO- --max-redirect=0 google.com 2>&1 | grep Date: | cut -d' ' -f5-8)Z\""
+	echo "2) for configure and run rdate server on Linux host:"
+	echo "- install xinetd: sudo apt-get install xinetd"
+	echo "- enable xinetd: /etc/init.d/xinetd enable"
+    echo "- create a config file: sudo gedit /etc/xinetd.d/time-stream"
+	echo "- paste the following content to the config file and save:"
+	echo "service time"
+	echo "{"
+	echo -e "\tdisable 	= no"
+	echo -e "\tid		= time-stream"
+	echo -e "\twait		= no"
+	echo -e "\tsocket_type 	= stream"
+	echo -e "\tflags		= IPv4"
+	echo "}"
+	echo "- restart xinetd: /etc/init.d/xinetd restart"
+	echo "2) for run rdate server on Windows host run RTC868 Time Protocol server:"
+	echo "- run rfc868timeserver.exe"
+	echo "- the programm can be found in next directory:"
+	echo "  R&D_Electronics(L:)\\Projects\\IMS1\\SW\\RFC868\\timeserver [\\\\figaro\\development\\Electronics\\Projects\\IMS1\\SW\\RFC868\\timeserver]"
+}
+
+#=================================================================================================================================================
+# main
+#=================================================================================================================================================
+if [ $# -gt 0 ] 
+	then
+	# first argument handler
+	case "$1" in
+		-p | --print)
+			print_ctime ;;
+		-u | --update)
+			get_time_and_update "$2" ;;
+		-v | --version)
+			print_version ;;
+		-h | --help)
+			print_help ;;
+		-hs | --help-server)
+			print_help_server ;;
+		*)
+			exit $exit_sts_unk_arg0	;;
+	esac
+else
+	print_ctime
+fi
+
+exit $?
