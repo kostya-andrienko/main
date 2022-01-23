@@ -1,1 +1,1 @@
-# xilinx - repo for xilinx boards software
+# xilinx - repo of xilinx products and solutions
