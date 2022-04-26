@@ -1,0 +1,107 @@
+
+
+#=================================================================================================================================================
+# global variables
+#=================================================================================================================================================
+readonly g_VERSION=v0.2
+readonly g_VERSION_DATE=05-Apr-2022
+readonly g_TITLE=vv
+readonly FALSE=0
+readonly TRUE=1
+readonly g_run_path="$HOME/tmp/"
+
+set -a
+
+#=================================================================================================================================================
+# run vivado
+#=================================================================================================================================================
+run_vivado()
+{
+	echo "Setup Vivado working environment"
+	case "$1" in
+		--2019)
+			source /tools/Xilinx/Vivado/2019.2/settings64.sh	
+		;;
+		--2020)
+			source /tools/Xilinx/Vivado/2020.2/settings64.sh
+		;;
+		--2021)
+			source /tools/Xilinx/Vivado/2021.2/settings64.sh
+		;;
+	
+	esac
+	echo "Vivado app path: $XILINX_VIVADO"
+	
+	if [[ $2 != "-e" ]]
+	then
+		echo "Start Vivado"
+		echo "Vivado running path: $g_run_path"
+		cwd=$(pwd)
+		cd $g_run_path
+		vivado -nojournal -nolog &
+		sleep 10
+		echo -e "Vivado PID: $(pidof vivado | cut -f1 -d' ')"
+		cd $cwd
+	fi
+}
+
+#=================================================================================================================================================
+# print script version, help
+#=================================================================================================================================================
+print_version()
+{
+	echo "$g_TITLE version: $g_VERSION ($g_VERSION_DATE)"
+}
+
+print_help()
+{
+	print_version
+	echo
+	echo "Description: the script run Vivado application"
+	echo
+	echo "Usage: $g_TITLE [Option#1] [Option#2]"
+	echo
+	echo "Option#1:"
+	echo -e " -19,  --2019 \t run Vivado v2019.2"
+	echo -e " -20,  --2020 \t run Vivado v2020.2"
+	echo -e " -21,  --2021 \t run Vivado v2021.2"
+	echo -e " -v,   --ver  \t print version information"
+	echo -e " -h,   --help \t print help information"
+	echo
+	echo "Option#2:"
+	echo -e " -e  \t setup vivado working environment only (without start vivado)"
+	echo
+}
+
+
+
+
+
+#=================================================================================================================================================
+# main
+#=================================================================================================================================================
+if [ $# -gt 0 ] 
+	then
+	# first argument handler
+	case "$1" in
+		-v | --ver)
+			print_version ;;
+		-h | --help)
+			print_help ;;
+		-19 | --2019)
+			run_vivado --2019 $2;;
+		-20 | --2020)
+			run_vivado --2020 $2;;
+		-21 | --2019)
+			run_vivado --2021 $2;;		
+		*)
+			print_help	;;
+	esac
+else
+	print_help
+fi
+
+exit $?
+
+
+
