@@ -1,0 +1,100 @@
+
+#=================================================================================================================================================
+# global variables
+#=================================================================================================================================================
+readonly g_VERSION=v0.1
+readonly g_VERSION_DATE=09-Jun-2022
+readonly g_TITLE=vt
+readonly FALSE=0
+readonly TRUE=1
+readonly g_run_path="$HOME/tmp/"
+
+set -a
+
+#=================================================================================================================================================
+# run vitis
+#=================================================================================================================================================
+run_vitis()
+{
+	echo "Setup Vitis working environment"
+	case "$1" in
+		--2019)
+			source /tools/Xilinx/Vitis/2019.2/settings64.sh	
+		;;
+		--2020)
+			source /tools/Xilinx/Vitis/2020.2/settings64.sh
+		;;
+		--2021)
+			source /tools/Xilinx/Vitis/2021.2/settings64.sh
+		;;
+	
+	esac
+	echo "Vitis app path: $XILINX_VIVADO"
+	
+	#if [[ $2 != "-e" ]]
+	#then
+		echo "Start Vitis"
+		echo "Vitis running path: $g_run_path"
+		cwd=$(pwd)
+		cd $g_run_path
+		vitis &
+		sleep 10
+		#echo -e "Vitis PID: $(pidof vitis | cut -f1 -d' ')"
+		echo
+		cd $cwd
+	#fi
+}
+
+#=================================================================================================================================================
+# print script version, help
+#=================================================================================================================================================
+print_version()
+{
+	echo "$g_TITLE version: $g_VERSION ($g_VERSION_DATE)"
+}
+
+print_help()
+{
+	print_version
+	echo
+	echo "Description: the script is starts up the Vitis application"
+	echo
+	echo "Usage: $g_TITLE [Option#1]"
+	echo
+	echo "Option#1:"
+	echo -e " -19,  --2019 \t run Vitis v2019.2"
+	echo -e " -20,  --2020 \t run Vitis v2020.2"
+	echo -e " -21,  --2021 \t run Vitis v2021.2"
+	echo -e " -v,   --ver  \t print version information"
+	echo -e " -h,   --help \t print help information"
+	echo
+
+}
+
+
+
+
+
+#=================================================================================================================================================
+# main
+#=================================================================================================================================================
+if [ $# -gt 0 ] 
+	then
+	# first argument handler
+	case "$1" in
+		-v | --ver)
+			print_version ;;
+		-h | --help)
+			print_help ;;
+		-19 | --2019)
+			run_vitis --2019 ;;
+		-20 | --2020)
+			run_vitis --2020 ;;
+		-21 | --2019)
+			run_vitis --2021 ;;		
+		*)
+			print_help	;;
+	esac
+else
+	print_help
+fi
